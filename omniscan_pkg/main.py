@@ -12,6 +12,7 @@ from .models import StuckFileTracker
 from .web import run_web_server
 import threading
 import secrets
+import configparser
 
 # ANSI escape codes
 BOLD = '\033[1m'
@@ -70,7 +71,20 @@ def main():
         logger.warning(f"{BOLD}⚠️  NO WEB PASSWORD SET ⚠️{RESET}")
         logger.warning(f"Generated temporary password: {BOLD}{generated_pwd}{RESET}")
         logger.warning(f"User: {config.get('WEB_USERNAME', 'admin')}")
-        logger.warning(f"Please update config.ini to set a permanent password.")
+        logger.warning(f"Saving generated password to config.ini...")
+        
+        try:
+            cfg_parser = configparser.ConfigParser()
+            cfg_parser.read('config.ini')
+            if not cfg_parser.has_section('web'):
+                cfg_parser.add_section('web')
+            cfg_parser.set('web', 'username', config.get('WEB_USERNAME', 'admin'))
+            cfg_parser.set('web', 'password', generated_pwd)
+            with open('config.ini', 'w') as f:
+                cfg_parser.write(f)
+            logger.info("✅ Password saved to config.ini")
+        except Exception as e:
+            logger.error(f"Failed to save password to config.ini: {e}")
 
     if config.get('DRY_RUN'):
         logger.info(f"{BOLD}⚠️ DRY RUN MODE ENABLED - No changes will be made ⚠️{RESET}")
