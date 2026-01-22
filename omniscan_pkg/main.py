@@ -11,6 +11,7 @@ from .watcher import start_watcher
 from .models import StuckFileTracker
 from .web import run_web_server
 import threading
+import secrets
 
 # ANSI escape codes
 BOLD = '\033[1m'
@@ -63,6 +64,14 @@ def main():
     
     logger.info("Starting Omniscan")
     
+    if not config.get('WEB_PASSWORD'):
+        generated_pwd = secrets.token_urlsafe(16)
+        config['WEB_PASSWORD'] = generated_pwd
+        logger.warning(f"{BOLD}⚠️  NO WEB PASSWORD SET ⚠️{RESET}")
+        logger.warning(f"Generated temporary password: {BOLD}{generated_pwd}{RESET}")
+        logger.warning(f"User: {config.get('WEB_USERNAME', 'admin')}")
+        logger.warning(f"Please update config.ini to set a permanent password.")
+
     if config.get('DRY_RUN'):
         logger.info(f"{BOLD}⚠️ DRY RUN MODE ENABLED - No changes will be made ⚠️{RESET}")
 
