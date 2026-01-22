@@ -1,0 +1,26 @@
+[logs]
+loglevel = INFO # DEBUG, INFO, WARNING, ERROR, CRITICAL
+
+[plex]
+server = http://192.168.1.154:32400
+token = UMGMzyfowTDUZaBFRJ9b
+
+[scan]
+# Single directory:
+# directories = /mnt/Plex
+# Multiple directories (comma-separated):
+# directories = /mnt/Plex, /mnt/OtherMedia
+# Multiple directories (newline-separated):
+directories = 
+    /mnt/Plex
+    /mnt/Movies
+
+
+[behaviour]
+scan_interval = 5
+run_interval = 24
+symlink_check = true
+
+[notifications]
+enabled = true
+discord_webhook_url = https://discord.com/api/webhooks/1241549755314737252/fBBIxDDWsxfRphkBNvNKiq56bnUdsq_zdQIRDoEIlwCc8FhrhA2UtMphmIG4l0pBNWfb
