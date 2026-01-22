@@ -11,7 +11,6 @@
   <a href="https://github.com/drondeseries/omniscan/stargazers"><img alt="GitHub Repo stars" src="https://img.shields.io/github/stars/drondeseries/omniscan?label=Omniscan&style=flat-square&color=blue"></a>
   <a href="https://github.com/drondeseries/omniscan/issues"><img alt="Issues" src="https://img.shields.io/github/issues/drondeseries/omniscan?style=flat-square&color=orange" /></a>
   <a href="https://github.com/drondeseries/omniscan/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/github/license/drondeseries/omniscan?style=flat-square&color=green"></a>
-  <a href="https://discord.gg/vMSnNcd7m5"><img alt="Discord" src="https://img.shields.io/badge/Join%20Discord-7289DA?style=flat-square&logo=discord&logoColor=white" /></a>
 </div>
 
 <h1 align="center">Omniscan</h1>
