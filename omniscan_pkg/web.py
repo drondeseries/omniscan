@@ -60,10 +60,7 @@ def verify_credentials(username, password):
     config_user = scanner_instance.config.get('WEB_USERNAME', 'admin')
     config_pass = scanner_instance.config.get('WEB_PASSWORD')
     if not config_pass:
-        if not hasattr(scanner_instance, '_generated_password'):
-            scanner_instance._generated_password = secrets.token_urlsafe(16)
-            logger.warning(f"No web password set. Generated: {scanner_instance._generated_password}")
-        config_pass = scanner_instance._generated_password
+        return False
     return secrets.compare_digest(username, config_user) and secrets.compare_digest(password, config_pass)
 
 def load_template(filename):
