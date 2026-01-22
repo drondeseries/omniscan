@@ -34,4 +34,10 @@ ENV/
 *.swo
 
 # Logs
-*.log 
+*.log
+*.log.*
+
+# Data
+*.db
+*.sqlite
+missing_files_history.json 

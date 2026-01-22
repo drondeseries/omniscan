@@ -1,18 +1,25 @@
 services:
-  rescan:
-    restart: unless-stopped 
-    container_name: rescan 
+  omniscan:
     build: .
-    hostname: rescan 
-    networks: 
-      - saltbox
-    labels:
-      com.github.saltbox.saltbox_managed: true 
+    restart: unless-stopped 
+    container_name: omniscan 
+    image: omniscan:latest
+    hostname: omniscan 
+    command: python -m omniscan_pkg.main --watch
+    ports:
+      - 8085:8000
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/New_York
     volumes: 
-      - /opt/rescan:/app/config
+      - /media/docker/data/omniscan:/app/config
       - /etc/localtime:/etc/localtime:ro
-      - /mnt:/mnt
+      - /mnt:/mnt:rslave
+      - /media:/media:rslave
+    networks:
+      - pangolin
 
-networks: 
-  saltbox:
-    external: true 
+networks:
+  pangolin:
+    external: true

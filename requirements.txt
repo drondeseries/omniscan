@@ -2,4 +2,12 @@ plexapi>=4.15.4
 requests>=2.31.0
 schedule>=1.2.1
 discord.py>=2.3.2
-aiohttp>=3.9.1 
+aiohttp>=3.9.1
+watchdog
+fastapi
+uvicorn
+jinja2
+pytest
+python-multipart
+itsdangerous
+prometheus-client
