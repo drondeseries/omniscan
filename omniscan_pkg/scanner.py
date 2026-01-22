@@ -68,8 +68,8 @@ class PlexScanner:
         except Exception as e:
             logger.error(f"Failed to send single notification: {e}")
 
-    def connect_to_plex(self):
-        """Connect to Plex with a retry loop. Only if server_type is plex."""
+    def connect_to_plex(self, retry=True):
+        """Connect to Plex. If retry=True, loops until connected. If False, raises error on failure."""
         if self.config.get('SERVER_TYPE', 'plex') != 'plex':
             return None
             
@@ -79,6 +79,7 @@ class PlexScanner:
         while True:
             try:
                 if not self.config['PLEX_URL'] or not self.config['TOKEN']:
+                    if not retry: raise ValueError("PLEX_SERVER or PLEX_TOKEN not configured.")
                     logger.error("PLEX_SERVER or PLEX_TOKEN not configured.")
                     return None
                     
@@ -87,6 +88,8 @@ class PlexScanner:
                 logger.info(f"Connected to Plex: {self.plex.friendlyName} (v{self.plex.version})")
                 return self.plex
             except Exception as e:
+                if not retry:
+                    raise e
                 logger.error(f"Failed to connect to Plex ({self.config['PLEX_URL']}): {e}")
                 logger.info(f"Retrying in {retry_delay} seconds...")
                 time.sleep(retry_delay)

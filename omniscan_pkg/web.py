@@ -294,7 +294,7 @@ async def update_settings(s: SettingsUpdate, u: str = Depends(get_current_user))
         cfg.set('notifications', 'enabled', str(c['NOTIFICATIONS_ENABLED']).lower()); cfg.set('notifications', 'discord_webhook_url', c['DISCORD_WEBHOOK_URL'])
         cfg.set('ignore', 'patterns', ",".join(c['IGNORE_PATTERNS'])); cfg.set('logs', 'loglevel', c['LOG_LEVEL'])
         with open('config.ini', 'w') as f: cfg.write(f)
-        if c['SERVER_TYPE'] == 'plex': scanner_instance.connect_to_plex(); scanner_instance.get_library_ids()
+        if c['SERVER_TYPE'] == 'plex': scanner_instance.connect_to_plex(retry=False); scanner_instance.get_library_ids()
         return {"status": "success"}
     except Exception as e: return JSONResponse({"error": str(e)}, status_code=500)
 
