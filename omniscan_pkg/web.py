@@ -304,9 +304,52 @@ async def restart_system(u: str = Depends(get_current_user)):
     return {"status": "success"}
 
 @app.get("/api/browser/list")
-async def list_f(path: str = None, u: str = Depends(get_current_user)):
+async def list_f(path: str = None, query: str = None, u: str = Depends(get_current_user)):
     if not scanner_instance: return {"error": "init"}
     sp = scanner_instance.config.get('SCAN_PATHS', [])
+    
+    # Handle Keyword Search
+    if query and query.strip():
+        search_query = query.strip().lower()
+        results = []
+        search_roots = []
+        
+        if path:
+            # Search within specific allowed path
+            rp = pathlib.Path(path).resolve()
+            allowed = False
+            for s in sp:
+                bp = pathlib.Path(s).resolve()
+                if rp == bp or bp in rp.parents: allowed = True; break
+            if allowed: search_roots = [str(rp)]
+        else:
+            # Global search in all media roots
+            search_roots = sp
+
+        def perform_search():
+            matches = []
+            for root in search_roots:
+                for r, dirs, files in os.walk(root):
+                    # Check for matches in both dirs and files
+                    for name in dirs + files:
+                        if search_query in name.lower():
+                            full_path = os.path.join(r, name)
+                            try:
+                                stat = os.stat(full_path)
+                                matches.append({
+                                    "name": name, "path": full_path, "is_dir": os.path.isdir(full_path),
+                                    "size": stat.st_size if os.path.isfile(full_path) else 0,
+                                    "size_fmt": fmt_size(stat.st_size) if os.path.isfile(full_path) else "",
+                                    "date": datetime.fromtimestamp(stat.st_mtime).strftime('%Y-%m-%d %H:%M'),
+                                    "ext": os.path.splitext(name)[1].lower() if os.path.isfile(full_path) else None
+                                })
+                            except: continue
+                        if len(matches) >= 100: return matches
+            return matches
+
+        results = await asyncio.get_event_loop().run_in_executor(None, perform_search)
+        return {"current_path": f"Search results for: {query}", "items": results, "is_search": True}
+
     if not path: return {"current_path": "", "is_root": True, "items": [{"name": p, "path": p, "is_dir": True, "size_fmt": "", "date": ""} for p in sp]}
     try:
         rp = pathlib.Path(path).resolve(); allowed = False
