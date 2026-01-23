@@ -432,21 +432,39 @@ async def webhook_trigger(request: Request):
         for p in paths_to_scan:
             if not p: continue
             logger.info(f"Webhook trigger for: {p}")
-            if os.path.isfile(p):
-                scanner_instance.scan_file(p)
-                triggered += 1
-            elif os.path.isdir(p):
-                lid, _, _ = scanner_instance.get_library_id_for_path(p)
-                if lid:
-                    scanner_instance.trigger_scan(lid, p)
+            
+            # Retry logic for filesystem latency (e.g. rclone mounts)
+            exists = False
+            for _ in range(3):
+                if os.path.exists(p):
+                    exists = True
+                    break
+                time.sleep(1)
+            
+            if exists:
+                if os.path.isfile(p):
+                    scanner_instance.scan_file(p)
                     triggered += 1
-                else:
-                    # If directory but not in library map, maybe scan recursively? 
-                    # For safety, we just log warning or maybe scan_directory logic?
-                    # Let's try to map it to a library even if loose match
-                    logger.warning(f"Webhook path not in library: {p}")
+                elif os.path.isdir(p):
+                    lid, _, _ = scanner_instance.get_library_id_for_path(p)
+                    if lid:
+                        scanner_instance.trigger_scan(lid, p)
+                        triggered += 1
+                    else:
+                        logger.warning(f"Webhook path not in library: {p}")
             else:
-                logger.warning(f"Webhook path does not exist: {p}")
+                # If path doesn't exist, try falling back to parent folder if it looks like a file path
+                parent = os.path.dirname(p)
+                if os.path.isdir(parent):
+                    logger.info(f"Webhook path missing, falling back to parent: {parent}")
+                    lid, _, _ = scanner_instance.get_library_id_for_path(parent)
+                    if lid:
+                        scanner_instance.trigger_scan(lid, parent)
+                        triggered += 1
+                    else:
+                        logger.warning(f"Webhook path does not exist: {p}")
+                else:
+                    logger.warning(f"Webhook path does not exist: {p}")
 
         return {"status": "success", "triggered": triggered}
         
