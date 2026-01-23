@@ -5,6 +5,7 @@ import fnmatch
 import threading
 import subprocess
 import random
+import gc
 from urllib.parse import quote
 from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
@@ -35,7 +36,7 @@ class PlexScanner:
         self.library_ids = {}
         self.library_paths = {}
         self.library_sections_cache = []
-        self.library_files = defaultdict(set)
+        self.library_files = {} # Changed to dict for easier clearing
         self.library_files_lock = threading.Lock()
         self.pending_scans = {}
         self.pending_scans_lock = threading.Lock()
@@ -188,7 +189,7 @@ class PlexScanner:
     def cache_library_files(self, library_id):
         """Cache all files in a library section."""
         with self.library_files_lock:
-            if library_id in self.library_files:
+            if library_id in self.library_files and self.library_files[library_id]:
                 return
         
         try:
@@ -211,8 +212,11 @@ class PlexScanner:
                             new_files.add(part.file)
                             count += 1
             
+            # Clear items list immediately to free memory
+            del items
+
             with self.library_files_lock:
-                self.library_files[library_id].update(new_files)
+                self.library_files[library_id] = new_files
 
             cache_time = time.time() - cache_start
             logger.info(f"💾 Cache initialized for library {BOLD}{section.title}{RESET}: {BOLD}{count}{RESET} files in {BOLD}{cache_time:.2f}{RESET} seconds")
@@ -223,26 +227,66 @@ class PlexScanner:
         """Check if a file exists in the media server."""
         server_type = self.config.get('SERVER_TYPE', 'plex')
         
+        # Check cache if it exists (usually during full scan)
+        library_id, library_title, _ = self.get_library_id_for_path(file_path)
+        if library_id:
+            with self.library_files_lock:
+                if library_id in self.library_files and self.library_files[library_id]:
+                    return file_path in self.library_files[library_id]
+
+        # If cache is empty or missing, fallback to direct API check (memory efficient for watcher)
         if server_type == 'plex':
-            return self._is_in_plex(file_path)
+            return self._is_in_plex_api(file_path, library_id)
         elif server_type in ['jellyfin', 'emby']:
-            return self._is_in_jellyfin(file_path)
+            return self._is_in_jellyfin_api(file_path, library_id)
         return False
 
+    def _is_in_plex_api(self, file_path, library_id=None):
+        """Directly check Plex API for a file without using a large RAM cache."""
+        if not self.plex: return False
+        try:
+            if not library_id:
+                library_id, _, _ = self.get_library_id_for_path(file_path)
+            
+            if not library_id: return False
+            
+            section = self.plex.library.sectionByID(int(library_id))
+            # Search by filepath (Plex supports this filter)
+            results = section.search(filepath=file_path)
+            return len(results) > 0
+        except Exception as e:
+            logger.debug(f"Direct Plex check failed for {file_path}: {e}")
+            return False
+
+    def _is_in_jellyfin_api(self, file_path, library_id=None):
+        """Check if file exists in Jellyfin/Emby via API search."""
+        if not library_id:
+            library_id, _, _ = self.get_library_id_for_path(file_path)
+        if not library_id: return False
+        
+        url = f"{self.config['SERVER_URL']}/Items?ParentId={library_id}&Recursive=true&Fields=Path&IncludeItemTypes=Movie,Episode"
+        headers = {"X-Emby-Token": self.config['API_KEY']}
+        try:
+            # We don't want to fetch all items if we are just checking one
+            # Jellyfin supports Path filter in some versions or via Search
+            # For simplicity, if we don't have cache, we might have to use a targeted query
+            # Search by term (filename) is often faster than fetching all
+            filename = os.path.basename(file_path)
+            search_url = f"{self.config['SERVER_URL']}/Items?ParentId={library_id}&Recursive=true&Fields=Path&IncludeItemTypes=Movie,Episode&searchTerm={quote(filename)}"
+            res = requests.get(search_url, headers=headers)
+            res.raise_for_status()
+            items = res.json().get('Items', [])
+            for item in items:
+                if item.get('Path') == file_path:
+                    return True
+            return False
+        except Exception as e:
+            logger.error(f"Failed to check {self.config['SERVER_TYPE']} for {file_path}: {e}")
+            return False
+
     def _is_in_jellyfin(self, file_path):
-        """Check if file exists in Jellyfin/Emby via API."""
-        library_id, library_title, _ = self.get_library_id_for_path(file_path)
-        if not library_id: return False # Not in any library folder
-        
-        with self.library_files_lock:
-            if library_id in self.library_files:
-                return file_path in self.library_files[library_id]
-        
-        # Populate cache for this library
-        self._cache_jellyfin_library(library_id)
-        
-        with self.library_files_lock:
-            return file_path in self.library_files[library_id]
+        """Legacy method for compatibility, now calls is_in_library logic."""
+        return self.is_in_library(file_path)
 
     def _cache_jellyfin_library(self, library_id):
         try:
@@ -259,6 +303,10 @@ class PlexScanner:
                 if 'Path' in item:
                     new_files.add(item['Path'])
             
+            # Clear large objects to free memory
+            del data
+            del items
+
             with self.library_files_lock:
                 self.library_files[library_id] = new_files
             
@@ -267,14 +315,8 @@ class PlexScanner:
             logger.error(f"Failed to cache {self.config['SERVER_TYPE']} library: {e}")
 
     def _is_in_plex(self, file_path):
-        """Check if a file exists in Plex."""
-        library_id, library_title, library_type = self.get_library_id_for_path(file_path)
-        if not library_id:
-            return False
-
-        self.cache_library_files(library_id)
-        with self.library_files_lock:
-            return file_path in self.library_files[library_id]
+        """Legacy method for compatibility, now calls is_in_library logic."""
+        return self.is_in_library(file_path)
 
     def get_entity_root(self, file_path):
         """Get the root folder of the show or movie for batching scans."""
@@ -748,7 +790,9 @@ class PlexScanner:
             stats = RunStats(self.config)
             tracker = StuckFileTracker()
             
-            self.library_files.clear()
+            # Use lock when clearing and re-filling cache
+            with self.library_files_lock:
+                self.library_files.clear()
             logger.info("Cache cleared for new scan")
             
             if not self.plex:
@@ -779,58 +823,57 @@ class PlexScanner:
                         continue
 
                     try:
-                        entries = list(os.scandir(SCAN_PATH))
+                        # Iterate directly instead of converting to list
+                        with os.scandir(SCAN_PATH) as it:
+                            for entry in it:
+                                if entry.name.startswith('.'): continue
+                                
+                                if entry.is_dir():
+                                    if not self.is_ignored(entry.path):
+                                        futures.append(executor.submit(self.scan_directory, entry.path, stats, tracker, folders_to_scan, folders_to_scan_lock))
+                                elif entry.is_file():
+                                    file_path = entry.path
+                                    if self.is_ignored(file_path): continue
+                                    
+                                    if self.config['SYMLINK_CHECK'] and self.is_broken_symlink(file_path):
+                                        stats.increment_broken_symlinks()
+                                        continue
+                                        
+                                    try:
+                                        if os.path.getsize(file_path) == 0:
+                                            stats.add_corrupt_item(file_path)
+                                            continue
+                                    except OSError:
+                                        continue
+                                        
+                                    file_name = os.path.basename(file_path)
+                                    file_ext = os.path.splitext(file_name)[1].lower()
+                                    if file_ext not in self.config['MEDIA_EXTENSIONS']: continue
+                                    
+                                    stats.increment_scanned()
+                                    SCANNED_FILES_TOTAL.inc()
+                                    
+                                    if not self.is_in_library(file_path):
+                                        if self.config.get('HEALTH_CHECK'):
+                                           is_healthy, _ = self.check_file_health(file_path)
+                                           if not is_healthy:
+                                               stats.add_corrupt_item(file_path)
+                                               continue
+
+                                        library_id, library_title, library_type = self.get_library_id_for_path(file_path)
+                                        if library_title:
+                                            if tracker.increment_attempt(file_path):
+                                                stats.add_stuck_item(file_path)
+                                            else:
+                                                stats.add_missing_item(library_title, file_path)
+                                                parent_folder = os.path.dirname(file_path)
+                                                with folders_to_scan_lock:
+                                                    folders_to_scan.add((library_id, parent_folder))
+                                    else:
+                                        tracker.clear_entry(file_path)
                     except OSError as e:
                         logger.error(f"Error accessing {SCAN_PATH}: {e}")
                         continue
-
-                    subdirs = [e.path for e in entries if e.is_dir() and not e.name.startswith('.')] 
-                    files = [e.path for e in entries if e.is_file() and not e.name.startswith('.')] 
-                    
-                    for subdir in subdirs:
-                        if not self.is_ignored(subdir):
-                            futures.append(executor.submit(self.scan_directory, subdir, stats, tracker, folders_to_scan, folders_to_scan_lock))
-                    
-                    # Process files in root directory synchronously
-                    for file_path in files:
-                         if self.is_ignored(file_path): continue
-                         
-                         if self.config['SYMLINK_CHECK'] and self.is_broken_symlink(file_path):
-                             stats.increment_broken_symlinks()
-                             continue
-                             
-                         try:
-                             if os.path.getsize(file_path) == 0:
-                                 stats.add_corrupt_item(file_path)
-                                 continue
-                         except OSError:
-                             continue
-                             
-                         file_name = os.path.basename(file_path)
-                         file_ext = os.path.splitext(file_name)[1].lower()
-                         if file_ext not in self.config['MEDIA_EXTENSIONS']: continue
-                         
-                         stats.increment_scanned()
-                         SCANNED_FILES_TOTAL.inc()
-                         
-                         if not self.is_in_library(file_path):
-                             if self.config.get('HEALTH_CHECK'):
-                                is_healthy, _ = self.check_file_health(file_path)
-                                if not is_healthy:
-                                    stats.add_corrupt_item(file_path)
-                                    continue
-
-                             library_id, library_title, library_type = self.get_library_id_for_path(file_path)
-                             if library_title:
-                                 if tracker.increment_attempt(file_path):
-                                     stats.add_stuck_item(file_path)
-                                 else:
-                                     stats.add_missing_item(library_title, file_path)
-                                     parent_folder = os.path.dirname(file_path)
-                                     with folders_to_scan_lock:
-                                         folders_to_scan.add((library_id, parent_folder))
-                         else:
-                             tracker.clear_entry(file_path)
 
                 for future in futures:
                     future.result()
@@ -849,3 +892,7 @@ class PlexScanner:
             logger.error(f"Error during scan: {e}")
         finally:
             self.is_scanning = False
+            # Clear cache after full scan to save memory
+            with self.library_files_lock:
+                self.library_files.clear()
+            gc.collect() # Trigger garbage collection to release memory immediately
