@@ -17,7 +17,12 @@ class TestPlexScanner(unittest.TestCase):
             'MEDIA_EXTENSIONS': {'.mkv', '.mp4'},
             'SYMLINK_CHECK': True,
             'SCAN_PATHS': ['/data'],
-            'NOTIFICATIONS_ENABLED': False
+            'NOTIFICATIONS_ENABLED': False,
+            'SCAN_DELAY': 0.0,
+            'INCREMENTAL_SCAN': False,
+            'HEALTH_CHECK': False,
+            'SCAN_WORKERS': 4,
+            'SERVER_TYPE': 'plex'
         }
         self.scanner = PlexScanner(self.config)
 
@@ -66,7 +71,7 @@ class TestPlexScanner(unittest.TestCase):
         
         # Mock is_in_plex to return False (missing)
         self.scanner.is_in_plex = MagicMock(return_value=False)
-        self.scanner.get_library_id_for_path = MagicMock(return_value=('1', 'Movies'))
+        self.scanner.get_library_id_for_path = MagicMock(return_value=('1', 'Movies', 'movie'))
         
         stats = RunStats(self.config)
         tracker = StuckFileTracker()
