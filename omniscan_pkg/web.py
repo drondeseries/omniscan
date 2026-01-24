@@ -156,7 +156,7 @@ async def clear_history(u: str = Depends(get_current_user)):
 
 class SettingsUpdate(BaseModel):
     server_type: str; server_url: str; api_key: str; plex_server: str; plex_token: str; scan_directories: str
-    scan_workers: int; scan_debounce: int; scan_delay: float; use_polling: bool; run_interval: int; run_on_startup: bool
+    scan_workers: int; scan_debounce: int; scan_delay: float; use_polling: bool; watch_mode: bool; run_interval: int; run_on_startup: bool
     start_time: Optional[str] = None; incremental_scan: bool; scan_since_days: int; health_check: bool; symlink_check: bool
     ignore_samples: bool; min_duration: int; notifications_enabled: bool; discord_webhook_url: str; ignore_patterns: str; log_level: str
 
@@ -220,7 +220,7 @@ async def get_stats(u: str = Depends(get_current_user)):
             "server_type": cfg.get('SERVER_TYPE'), "server_url": mask_s(cfg.get('SERVER_URL', '')), "api_key": mask_s(cfg.get('API_KEY', '')),
             "plex_server": cfg.get('PLEX_URL'), "plex_token": mask_s(cfg.get('TOKEN', '')), "scan_directories": "\n".join(cfg.get('SCAN_PATHS', [])),
             "scan_workers": cfg.get('SCAN_WORKERS'), "scan_debounce": cfg.get('SCAN_DEBOUNCE'), "scan_delay": cfg.get('SCAN_DELAY'),
-            "use_polling": cfg.get('USE_POLLING'), "run_interval": cfg.get('RUN_INTERVAL'), "run_on_startup": cfg.get('RUN_ON_STARTUP'),
+            "use_polling": cfg.get('USE_POLLING'), "watch_mode": cfg.get('WATCH_MODE'), "run_interval": cfg.get('RUN_INTERVAL'), "run_on_startup": cfg.get('RUN_ON_STARTUP'),
             "start_time": cfg.get('START_TIME'), "incremental_scan": cfg.get('INCREMENTAL_SCAN'), "scan_since_days": cfg.get('SCAN_SINCE_DAYS'),
             "health_check": cfg.get('HEALTH_CHECK'), "symlink_check": cfg.get('SYMLINK_CHECK'), "ignore_samples": cfg.get('IGNORE_SAMPLES'),
             "min_duration": cfg.get('MIN_DURATION'), "notifications_enabled": cfg.get('NOTIFICATIONS_ENABLED'),
@@ -275,7 +275,7 @@ async def update_settings(s: SettingsUpdate, u: str = Depends(get_current_user))
     c['PLEX_URL'] = s.plex_server; c['TOKEN'] = unmask_v(s.plex_token, c.get('TOKEN', ''))
     c['SCAN_PATHS'] = [p.strip() for p in s.scan_directories.replace(',', '\n').split('\n') if p.strip()]
     c['SCAN_WORKERS'] = s.scan_workers; c['SCAN_DEBOUNCE'] = s.scan_debounce; c['SCAN_DELAY'] = s.scan_delay
-    c['USE_POLLING'] = s.use_polling; c['RUN_INTERVAL'] = s.run_interval; c['RUN_ON_STARTUP'] = s.run_on_startup; c['START_TIME'] = s.start_time
+    c['USE_POLLING'] = s.use_polling; c['WATCH_MODE'] = s.watch_mode; c['RUN_INTERVAL'] = s.run_interval; c['RUN_ON_STARTUP'] = s.run_on_startup; c['START_TIME'] = s.start_time
     c['INCREMENTAL_SCAN'] = s.incremental_scan; c['SCAN_SINCE_DAYS'] = s.scan_since_days; c['HEALTH_CHECK'] = s.health_check
     c['SYMLINK_CHECK'] = s.symlink_check; c['IGNORE_SAMPLES'] = s.ignore_samples; c['MIN_DURATION'] = s.min_duration
     c['NOTIFICATIONS_ENABLED'] = s.notifications_enabled; c['DISCORD_WEBHOOK_URL'] = unmask_v(s.discord_webhook_url, c.get('DISCORD_WEBHOOK_URL', ''))
@@ -288,7 +288,7 @@ async def update_settings(s: SettingsUpdate, u: str = Depends(get_current_user))
         cfg.set('plex', 'server', str(c['PLEX_URL'])); cfg.set('plex', 'token', str(c['TOKEN']))
         cfg.set('scan', 'directories', ",".join(c['SCAN_PATHS']))
         cfg.set('behaviour', 'scan_workers', str(c['SCAN_WORKERS'])); cfg.set('behaviour', 'scan_debounce', str(c['SCAN_DEBOUNCE'])); cfg.set('behaviour', 'scan_delay', str(c['SCAN_DELAY']))
-        cfg.set('behaviour', 'use_polling', str(c['USE_POLLING']).lower()); cfg.set('behaviour', 'run_interval', str(c['RUN_INTERVAL'])); cfg.set('behaviour', 'run_on_startup', str(c['RUN_ON_STARTUP']).lower())
+        cfg.set('behaviour', 'use_polling', str(c['USE_POLLING']).lower()); cfg.set('behaviour', 'watch', str(c['WATCH_MODE']).lower()); cfg.set('behaviour', 'run_interval', str(c['RUN_INTERVAL'])); cfg.set('behaviour', 'run_on_startup', str(c['RUN_ON_STARTUP']).lower())
         cfg.set('behaviour', 'start_time', c['START_TIME'] if c['START_TIME'] else ""); cfg.set('behaviour', 'incremental_scan', str(c['INCREMENTAL_SCAN']).lower()); cfg.set('behaviour', 'scan_since_days', str(c['SCAN_SINCE_DAYS']))
         cfg.set('behaviour', 'health_check', str(c['HEALTH_CHECK']).lower()); cfg.set('behaviour', 'symlink_check', str(c['SYMLINK_CHECK']).lower()); cfg.set('behaviour', 'ignore_samples', str(c['IGNORE_SAMPLES']).lower()); cfg.set('behaviour', 'min_duration', str(c['MIN_DURATION']))
         cfg.set('notifications', 'enabled', str(c['NOTIFICATIONS_ENABLED']).lower()); cfg.set('notifications', 'discord_webhook_url', str(c['DISCORD_WEBHOOK_URL']))
