@@ -56,6 +56,7 @@ def load_config(config_path='config.ini'):
     cfg['SCAN_WORKERS'] = get_config_val(config, 'SCAN_WORKERS', 'behaviour', 'scan_workers', 4, int)
     cfg['SCAN_DEBOUNCE'] = get_config_val(config, 'SCAN_DEBOUNCE', 'behaviour', 'scan_debounce', 10, int)
     cfg['USE_POLLING'] = get_config_val(config, 'USE_POLLING', 'behaviour', 'use_polling', 'false', lambda x: str(x).lower() == 'true')
+    cfg['WATCH_MODE'] = get_config_val(config, 'WATCH_MODE', 'behaviour', 'watch', 'false', lambda x: str(x).lower() == 'true')
     
     # New Features
     cfg['INCREMENTAL_SCAN'] = get_config_val(config, 'INCREMENTAL_SCAN', 'behaviour', 'incremental_scan', 'false', lambda x: str(x).lower() == 'true')
