@@ -81,8 +81,7 @@ class ConnectionManager:
         self.active_connections.append(websocket)
     def disconnect(self, websocket: WebSocket):
         self.active_connections.remove(websocket)
-    async def broadcast(self, message: str):
-        recent_logs.append(message)
+    async def broadcast_to_clients(self, message: str):
         for connection in self.active_connections:
             try: await connection.send_text(message)
             except: pass
@@ -91,10 +90,12 @@ manager = ConnectionManager()
 
 class WebSocketLogHandler(logging.Handler):
     def emit(self, record):
-        log_entry = self.format(record)
-        if main_loop:
-            try: asyncio.run_coroutine_threadsafe(manager.broadcast(log_entry), main_loop)
-            except: pass
+        try:
+            log_entry = self.format(record)
+            recent_logs.append(log_entry)
+            if main_loop:
+                asyncio.run_coroutine_threadsafe(manager.broadcast_to_clients(log_entry), main_loop)
+        except: pass
 
 @app.get("/api/logs")
 async def get_logs(u: str = Depends(get_current_user)):
