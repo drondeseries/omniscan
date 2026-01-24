@@ -148,7 +148,7 @@ def main():
             logger.error(f"Path not found: {path}")
         sys.exit(0)
 
-    if args.watch:
+    if args.watch or config.get('WATCH_MODE'):
         logger.info("🚀 Starting Real-time Watcher...")
         if not scanner.plex:
             scanner.connect_to_plex()
