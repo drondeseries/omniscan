@@ -258,7 +258,10 @@
                                 </div>
                                 <div class="grid grid-cols-2 gap-4 mt-3">
                                     <div><label class="block text-[10px] font-black uppercase mb-1">Log Level</label><select id="s-loglevel" class="w-full p-3"><option value="DEBUG">DEBUG</option><option value="INFO">INFO</option><option value="WARNING">WARNING</option><option value="ERROR">ERROR</option></select></div>
-                                    <div class="flex items-center gap-2 mt-4"><input type="checkbox" id="s-poll" class="w-4 h-4"><label class="text-xs">Use Polling</label></div>
+                                    <div class="flex flex-col gap-2 mt-4">
+                                        <div class="flex items-center gap-2"><input type="checkbox" id="s-watch" class="w-4 h-4"><label class="text-xs">Enable Watcher</label></div>
+                                        <div class="flex items-center gap-2"><input type="checkbox" id="s-poll" class="w-4 h-4"><label class="text-xs">Use Polling</label></div>
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -474,6 +477,7 @@
                 ignore_samples: document.getElementById('s-samples').checked,
                 min_duration: parseInt(document.getElementById('s-duration').value),
                 use_polling: document.getElementById('s-poll').checked,
+                watch_mode: document.getElementById('s-watch').checked,
                 start_time: document.getElementById('s-start-time').value,
                 scan_delay: parseFloat(document.getElementById('s-delay').value),
                 log_level: document.getElementById('s-loglevel').value,
@@ -705,6 +709,7 @@
                     document.getElementById('s-samples').checked = c.ignore_samples; 
                     document.getElementById('s-duration').value = c.min_duration; 
                     document.getElementById('s-poll').checked = c.use_polling; 
+                    document.getElementById('s-watch').checked = c.watch_mode;
                     document.getElementById('s-start-time').value = c.start_time || ""; 
                     document.getElementById('s-delay').value = c.scan_delay; 
                     document.getElementById('s-loglevel').value = c.log_level; 
