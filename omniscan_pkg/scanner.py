@@ -686,6 +686,26 @@ class PlexScanner:
             if tracker: tracker.clear_entry(file_path)
 
     def handle_deletion(self, file_path):
+        # Filter by extension first
+        file_name = os.path.basename(file_path)
+        file_ext = os.path.splitext(file_name)[1].lower()
+        if file_ext not in self.config['MEDIA_EXTENSIONS']:
+            return
+
+        # Double-check if file is actually gone (to prevent Rclone/Network false positives)
+        if os.path.exists(file_path):
+            logger.debug(f"False positive deletion ignored (file exists): {file_path}")
+            return
+        
+        # Small delay to filter out transient glitches (e.g. during renames or network hiccups)
+        time.sleep(2)
+        if os.path.exists(file_path):
+            logger.debug(f"False positive deletion ignored (file reappeared): {file_path}")
+            return
+
+        # Check if parent directory still exists. If the whole folder is gone, we might be seeing a recursive delete.
+        # But if the folder is gone, the file is definitely gone, so we proceed.
+        
         logger.info(f"🗑️ File deleted: {BOLD}{file_path}{RESET}")
         
         library_id, library_title, library_type = self.get_library_id_for_path(file_path)
