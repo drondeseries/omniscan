@@ -696,6 +696,18 @@ class PlexScanner:
         if os.path.exists(file_path):
             logger.debug(f"False positive deletion ignored (file exists): {file_path}")
             return
+
+        # Check if the root scan path itself is accessible. 
+        # If the root of the scan is missing, the mount is likely down.
+        scan_root = None
+        for path in self.config['SCAN_PATHS']:
+             if file_path.startswith(path):
+                 scan_root = path
+                 break
+        
+        if scan_root and not os.path.exists(scan_root):
+            logger.warning(f"🛑 Scan root not accessible: {scan_root}. Assuming mount failure. Ignoring deletion of {file_path}")
+            return
         
         # Small delay to filter out transient glitches (e.g. during renames or network hiccups)
         time.sleep(2)
