@@ -1,4 +1,5 @@
 import logging
+import os
 from discord import Embed, Color
 
 logger = logging.getLogger(__name__)
@@ -8,6 +9,21 @@ def truncate_field_value(value, max_length=1024):
     if len(value) <= max_length:
         return value
     return value[:max_length-3] + "..."
+
+def format_file_list(files, max_items=10, prefix="• ", code_block=False, language=""):
+    """Format a list of files into a string with truncation."""
+    if not files:
+        return "None"
+    
+    items = files[:max_items]
+    formatted = "\n".join([f"{prefix}{f}" for f in items])
+    
+    if len(files) > max_items:
+        formatted += f"\n...and {len(files) - max_items} more"
+    
+    if code_block:
+        return f"```{language}\n{formatted}\n```"
+    return formatted
 
 def get_embed_length(embed):
     """Calculate the total character count of an embed as Discord does."""

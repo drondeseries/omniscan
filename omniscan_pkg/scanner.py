@@ -13,7 +13,7 @@ import requests
 from plexapi.server import PlexServer
 import asyncio
 from datetime import datetime, timedelta
-from .notifications import send_discord_webhook
+from .notifications import send_discord_webhook, format_file_list
 from discord import Embed, Color
 from .metrics import (
     SCANNED_FILES_TOTAL, MISSING_FILES_TOTAL, TRIGGERED_SCANS_TOTAL, 
@@ -51,8 +51,8 @@ class PlexScanner:
         self.worker_thread = threading.Thread(target=self._process_scan_queue, daemon=True)
         self.worker_thread.start()
 
-    def send_single_notification(self, title, description, color):
-        """Send a single-event notification to Discord."""
+    def _send_discord_embed(self, embed):
+        """Send a constructed Embed to Discord."""
         if not self.config['NOTIFICATIONS_ENABLED'] or not self.config.get('DISCORD_WEBHOOK_URL'):
             return
 
@@ -62,12 +62,17 @@ class PlexScanner:
                 async with aiohttp.ClientSession() as session:
                     from discord import Webhook
                     webhook = Webhook.from_url(self.config['DISCORD_WEBHOOK_URL'], session=session)
-                    embed = Embed(title=title, description=description, color=color, timestamp=datetime.now())
                     await send_discord_webhook(webhook, embed, self.config)
             
             asyncio.run(_send())
         except Exception as e:
-            logger.error(f"Failed to send single notification: {e}")
+            logger.error(f"Failed to send notification: {e}")
+
+    def send_single_notification(self, title, description, color):
+        """Send a single-event notification to Discord."""
+        embed = Embed(title=title, description=description, color=color, timestamp=datetime.now())
+        embed.set_footer(text="Omniscan Media Monitor")
+        self._send_discord_embed(embed)
 
     def connect_to_plex(self, retry=True):
         """Connect to Plex. If retry=True, loops until connected. If False, raises error on failure."""
@@ -403,24 +408,41 @@ class PlexScanner:
         """Send a single Discord notification for multiple file events."""
         added = data['added']
         deleted = data['deleted']
-        library = data['library_title']
+        library = data['library_title'] or "Unknown Library"
         entity_name = os.path.basename(entity_root)
         
-        description = f"**Library:** {library}\n"
+        # Determine Color
+        color = Color.blue()
+        if added and deleted:
+            color = Color.gold() # Mixed changes
+        elif added:
+            color = Color.green()
+        elif deleted:
+            color = Color.red()
+
+        embed = Embed(
+            title=f"📂 Update: {library}",
+            description=f"Changes detected in **{entity_name}**",
+            color=color,
+            timestamp=datetime.now()
+        )
+        
         if added:
-            if len(added) > 5:
-                description += f"✅ **Added:** {len(added)} files (including *{added[0]}*)\n"
-            else:
-                description += f"✅ **Added:**\n- " + "\n- ".join(added) + "\n"
+            embed.add_field(
+                name=f"✅ Added ({len(added)})", 
+                value=format_file_list(added, max_items=10, prefix="+ ", code_block=True, language="diff"), 
+                inline=False
+            )
         
         if deleted:
-            if len(deleted) > 5:
-                description += f"🗑️ **Deleted:** {len(deleted)} files\n"
-            else:
-                description += f"🗑️ **Deleted:**\n- " + "\n- ".join(deleted) + "\n"
+            embed.add_field(
+                name=f"🗑️ Deleted ({len(deleted)})", 
+                value=format_file_list(deleted, max_items=10, prefix="- ", code_block=True, language="diff"), 
+                inline=False
+            )
 
-        color = Color.green() if added else Color.orange()
-        self.send_single_notification(f"📂 Updated: {entity_name}", description, color)
+        embed.set_footer(text="Omniscan Media Monitor")
+        self._send_discord_embed(embed)
 
     def _do_trigger_scan(self, library_id, folder_path):
         """Actually trigger a library scan for a specific folder and wait for completion."""

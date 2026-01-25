@@ -4,7 +4,7 @@ import threading
 import logging
 from collections import defaultdict
 from datetime import datetime
-from .notifications import truncate_field_value, send_discord_webhook
+from .notifications import truncate_field_value, send_discord_webhook, format_file_list
 from discord import Embed, Color
 import aiohttp
 
@@ -208,55 +208,44 @@ class RunStats:
         try:
             # Create webhook client with aiohttp session
             async with aiohttp.ClientSession() as session:
-                # We need to pass the URL to send_discord_webhook or create a Webhook object here
-                # The original code created a Webhook object.
-                # Let's import Webhook from discord
                 from discord import Webhook
                 webhook = Webhook.from_url(webhook_url, session=session)
 
                 # Create embed
                 embed = Embed(
-                    title="Omniscan Summary",
+                    title="📊 Omniscan Scan Summary",
                     color=Color.blue(),
                     timestamp=datetime.now()
                 )
 
                 # Add overview
-                embed.add_field(
-                    name="📊 Overview",
-                    value=f"Found **{self.total_missing}** items from **{self.total_scanned}** scanned files",
-                    inline=False
+                embed.description = (
+                   f"**Scan Complete**\n"
+                   f"Found **{self.total_missing}** missing items\n"
+                   f"Scanned **{self.total_scanned}** total files"
                 )
 
                 # Add broken symlinks summary if any
                 if self.broken_symlinks > 0:
                     embed.add_field(
-                        name="⚠️ Issues",
+                        name="⚠️ Issues Detected",
                         value=f"Broken Symlinks Skipped: **{self.broken_symlinks}**",
                         inline=False
                     )
 
                 # Add stuck items summary
                 if self.stuck_items:
-                    stuck_text = "\n".join([f"❌ {os.path.basename(f)}" for f in self.stuck_items[:10]])
-                    if len(self.stuck_items) > 10:
-                        stuck_text += f"\n...and {len(self.stuck_items) - 10} more"
-                    
                     embed.add_field(
-                        name=f"⛔ Stuck Files (Skipped after 3 attempts)",
-                        value=truncate_field_value(stuck_text),
+                        name=f"⛔ Stuck Files ({len(self.stuck_items)})",
+                        value=format_file_list(self.stuck_items, prefix="! ", code_block=True),
                         inline=False
                     )
 
                 # Add corrupt items summary
                 if self.corrupt_items:
-                    corrupt_text = "\n".join([f"📉 {os.path.basename(f)}" for f in self.corrupt_items[:10]])
-                    if len(self.corrupt_items) > 10:
-                        corrupt_text += f"\n...and {len(self.corrupt_items) - 10} more"
-                    
                     embed.add_field(
-                        name=f"💀 Corrupt/Empty Files (0 bytes)",
-                        value=truncate_field_value(corrupt_text),
+                        name=f"💀 Corrupt/Empty Files ({len(self.corrupt_items)})",
+                        value=format_file_list(self.corrupt_items, prefix="x ", code_block=True),
                         inline=False
                     )
 
@@ -269,7 +258,7 @@ class RunStats:
                     )
 
                 # Add footer
-                embed.set_footer(text=f"Run Time: {self.get_run_time()}")
+                embed.set_footer(text=f"Omniscan Media Monitor • Run Time: {self.get_run_time()}")
 
                 # Send webhook
                 await send_discord_webhook(webhook, embed, self.config)
@@ -301,29 +290,26 @@ class RunStats:
                 webhook = Webhook.from_url(webhook_url, session=session)
 
                 embed = Embed(
-                    title="🔍 Scan Started - Found Missing Items",
-                    description=f"The following items are missing from Plex and will be scanned now.\n**Estimated duration: {est_str}**",
+                    title="🔍 Scan Started",
+                    description=f"Scanning **{folders_count}** folders for missing items.\nEstimated time: **{est_str}**",
                     color=Color.orange(),
                     timestamp=datetime.now()
                 )
 
                 embed.add_field(
                     name="📊 Overview",
-                    value=f"Found **{self.total_missing}** missing items across **{folders_count}** folders.",
+                    value=f"Found **{self.total_missing}** missing items.",
                     inline=False
                 )
 
                 for library, items in self.missing_items.items():
-                    file_list = "\n".join([f"• {os.path.basename(f)}" for f in items[:10]])
-                    if len(items) > 10:
-                        file_list += f"\n...and {len(items) - 10} more"
-                    
                     embed.add_field(
                         name=f"📁 {library} ({len(items)} items)",
-                        value=truncate_field_value(file_list),
+                        value=format_file_list(items, max_items=10, prefix="• ", code_block=True),
                         inline=False
                     )
 
+                embed.set_footer(text="Omniscan Media Monitor")
                 await send_discord_webhook(webhook, embed, self.config)
                 logger.info("✅ Pending scan notification sent successfully")
 
