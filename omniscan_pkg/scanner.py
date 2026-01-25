@@ -411,6 +411,12 @@ class PlexScanner:
         library = data['library_title'] or "Unknown Library"
         entity_name = os.path.basename(entity_root)
         
+        # Check if entity_name is "Season X" or "Specials" and prepend parent folder name
+        if entity_name.lower().startswith("season ") or entity_name.lower() in ["specials", "extras"]:
+            parent_name = os.path.basename(os.path.dirname(entity_root))
+            if parent_name:
+                entity_name = f"{parent_name} - {entity_name}"
+
         # Determine Color
         color = Color.blue()
         if added and deleted:
