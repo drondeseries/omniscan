@@ -22,8 +22,9 @@ def format_file_list(files, max_items=10, prefix="• ", code_block=False, langu
         formatted += f"\n...and {len(files) - max_items} more"
     
     if code_block:
-        return f"```{language}\n{formatted}\n```"
-    return formatted
+        res = f"```{language}\n{formatted}\n```"
+        return truncate_field_value(res, 1024)
+    return truncate_field_value(formatted, 1024)
 
 def get_embed_length(embed):
     """Calculate the total character count of an embed as Discord does."""

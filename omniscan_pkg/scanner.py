@@ -707,7 +707,7 @@ class PlexScanner:
                         # Use target_path as key for notifications so they group correctly with the scan
                         if target_path not in self.pending_notifications:
                             self.pending_notifications[target_path]['library_title'] = library_title
-                        self.pending_notifications[target_path]['added'].append(os.path.basename(file_path))
+                        self.pending_notifications[target_path]['added'].append(file_path)
                     
                     self.trigger_scan(library_id, target_path)
         else:
@@ -764,7 +764,7 @@ class PlexScanner:
             with self.pending_scans_lock:
                 if target_path not in self.pending_notifications:
                     self.pending_notifications[target_path]['library_title'] = library_title or "Media"
-                self.pending_notifications[target_path]['deleted'].append(os.path.basename(file_path))
+                self.pending_notifications[target_path]['deleted'].append(file_path)
 
             self.trigger_scan(library_id, target_path)
 
