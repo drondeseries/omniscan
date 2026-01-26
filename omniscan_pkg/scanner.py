@@ -674,12 +674,13 @@ class PlexScanner:
             
             # Health Check & Sample Detection
             if self.config.get('HEALTH_CHECK'):
-                is_healthy, _ = self.check_file_health(file_path)
+                is_healthy, health_status = self.check_file_health(file_path)
                 if not is_healthy:
                     if stats: stats.add_corrupt_item(file_path)
+                    error_reason = health_status.get('error', 'Unknown Error')
                     self.send_single_notification(
                         "⚠️ Corrupt File Detected", 
-                        f"The file is corrupt or empty and will be skipped:\n**{os.path.basename(file_path)}**", 
+                        f"The file is corrupt or empty and will be skipped:\n**{os.path.basename(file_path)}**\nPath: `{file_path}`\nReason: {error_reason}", 
                         Color.red()
                     )
                     return
