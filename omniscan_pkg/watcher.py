@@ -48,9 +48,25 @@ def start_watcher(scanner):
             logger.warning(f"Directory not found, cannot watch: {path}")
 
     observer.start()
+    
+    # Setup signal handling for graceful stop if running as main blocker
+    import signal
+    import threading
+    stop_event = threading.Event()
+    
+    def signal_handler(signum, frame):
+        logger.info("🛑 Watcher stopping...")
+        stop_event.set()
+
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
     try:
-        while True:
+        while not stop_event.is_set():
             time.sleep(1)
     except KeyboardInterrupt:
+        pass
+    finally:
         observer.stop()
-    observer.join()
+        observer.join()
+        logger.info("👋 Watcher stopped.")

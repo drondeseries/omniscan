@@ -142,7 +142,7 @@ def main():
                 for library_id, folder_path in sorted_folders:
                      scanner.trigger_scan(library_id, folder_path)
             
-            asyncio.run(stats.send_discord_summary())
+            scanner._run_async(stats.send_discord_summary())
             
         else:
             logger.error(f"Path not found: {path}")
@@ -166,7 +166,7 @@ def main():
     # Default: Scheduled Mode
     logger.info(f"Will run every {BOLD}{config['RUN_INTERVAL']}{RESET} hours")
     
-    if config['RUN_ON_STARTUP']:
+    if config.get('RUN_ON_STARTUP'):
         scanner.run_scan()
 
     if config['START_TIME']:
@@ -181,9 +181,26 @@ def main():
     else:
         schedule.every(config['RUN_INTERVAL']).hours.do(scanner.run_scan)
     
-    while True:
+    # Graceful Shutdown Handling
+    import signal
+    stop_event = threading.Event()
+
+    def signal_handler(signum, frame):
+        logger.info(f"🛑 Received signal {signum}, stopping...")
+        stop_event.set()
+        # Attempt to stop watcher if running
+        # (Watcher runs in main thread if enabled, but here we are in main thread too?)
+        # Actually start_watcher blocks if watch mode is on.
+        # But if we are in schedule mode, we are in the loop below.
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    while not stop_event.is_set():
         schedule.run_pending()
-        time.sleep(60)
+        time.sleep(1)
+    
+    logger.info("👋 Omniscan shutdown complete.")
 
 if __name__ == '__main__':
     main()
