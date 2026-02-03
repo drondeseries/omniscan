@@ -18,9 +18,12 @@ class StuckFileTracker:
         self._init_db()
 
     def _init_db(self):
+        self.prune_counter = 0
         with self.lock:
             try:
                 conn = sqlite3.connect(self.db_file)
+                # Enable WAL mode for better concurrency
+                conn.execute('PRAGMA journal_mode=WAL;')
                 cursor = conn.cursor()
                 cursor.execute('''
                     CREATE TABLE IF NOT EXISTS stuck_files (
@@ -51,8 +54,13 @@ class StuckFileTracker:
                 conn = sqlite3.connect(self.db_file)
                 cursor = conn.cursor()
                 cursor.execute('INSERT INTO events (timestamp, event_type, details, status) VALUES (?, ?, ?, ?)', (timestamp, event_type, details, status))
-                # Prune old events (keep last 20000)
-                cursor.execute('DELETE FROM events WHERE id NOT IN (SELECT id FROM events ORDER BY id DESC LIMIT 20000)')
+                
+                # Prune old events periodically (every 100 inserts) to reduce overhead
+                self.prune_counter += 1
+                if self.prune_counter >= 100:
+                    cursor.execute('DELETE FROM events WHERE id NOT IN (SELECT id FROM events ORDER BY id DESC LIMIT 20000)')
+                    self.prune_counter = 0
+                
                 conn.commit()
                 conn.close()
             except Exception as e:

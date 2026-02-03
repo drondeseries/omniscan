@@ -483,11 +483,11 @@ async def webhook_trigger(request: Request):
                 if os.path.exists(p):
                     exists = True
                     break
-                time.sleep(1)
+                await asyncio.sleep(1)
             
             if exists:
                 if os.path.isfile(p):
-                    scanner_instance.scan_file(p)
+                    scanner_instance.submit_file_event('created', p)
                     triggered += 1
                 elif os.path.isdir(p):
                     lid, _, _ = scanner_instance.get_library_id_for_path(p)
