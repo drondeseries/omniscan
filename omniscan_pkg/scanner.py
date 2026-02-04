@@ -1157,21 +1157,21 @@ class PlexScanner:
                 
                 sorted_folders = sorted(list(folders_to_scan), key=lambda x: x[1])
                 for library_id, folder_path in sorted_folders:
-                     self.trigger_scan(library_id, folder_path)
+                    self.trigger_scan(library_id, folder_path)
 
             tracker.save_history()
             self._run_async(stats.send_discord_summary())
             
         except Exception as e:
             logger.error(f"Error during scan: {e}")
-                finally:
-                    self.is_scanning = False
-                    # Only clear cache if NOT in watch mode.
-                    # If watching, we want to keep the cache hot to avoid re-fetching on every event.
-                    if not self.config.get('WATCH_MODE'):
-                        with self.library_files_lock:
-                            self.library_files.clear()
-                        gc.collect() # Trigger garbage collection to release memory
-                    else:
-                        logger.info("🧠 Retaining library cache for active watcher")
+        finally:
+            self.is_scanning = False
+            # Only clear cache if NOT in watch mode.
+            # If watching, we want to keep the cache hot to avoid re-fetching on every event.
+            if not self.config.get('WATCH_MODE'):
+                with self.library_files_lock:
+                    self.library_files.clear()
+                gc.collect() # Trigger garbage collection to release memory
+            else:
+                logger.info("🧠 Retaining library cache for active watcher")
         
