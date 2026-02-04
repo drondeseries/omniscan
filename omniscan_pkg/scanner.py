@@ -64,8 +64,7 @@ class PlexScanner:
         # Persistent session for connection pooling
         self.http_session = requests.Session()
         self.http_session.headers.update({
-            'User-Agent': 'Omniscan/1.0',
-            'Accept': 'application/json'
+            'User-Agent': 'Omniscan/1.0'
         })
         
         # Executor for processing file events asynchronously
