@@ -93,9 +93,18 @@ class WebSocketLogHandler(logging.Handler):
         try:
             log_entry = self.format(record)
             recent_logs.append(log_entry)
-            if main_loop:
+            
+            global main_loop
+            if main_loop is None:
+                try:
+                    main_loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    return
+
+            if main_loop and main_loop.is_running():
                 asyncio.run_coroutine_threadsafe(manager.broadcast_to_clients(log_entry), main_loop)
-        except: pass
+        except Exception:
+            pass
 
 @app.get("/api/logs")
 async def get_logs(u: str = Depends(get_current_user)):
@@ -159,7 +168,8 @@ class SettingsUpdate(BaseModel):
     server_type: str; server_url: str; api_key: str; plex_server: str; plex_token: str; scan_directories: str
     scan_workers: int; scan_debounce: int; scan_delay: float; use_polling: bool; watch_mode: bool; run_interval: int; run_on_startup: bool
     start_time: Optional[str] = None; incremental_scan: bool; scan_since_days: int; health_check: bool; symlink_check: bool
-    ignore_samples: bool; min_duration: int; notifications_enabled: bool; discord_webhook_url: str; ignore_patterns: str; log_level: str
+    ignore_samples: bool; min_duration: int; deletion_threshold: int; abort_on_mass_deletion: bool
+    notifications_enabled: bool; discord_webhook_url: str; ignore_patterns: str; log_level: str
 
 def mask_s(v): return (v[:4] + "****" + v[-4:]) if v and len(v) >= 8 else "********"
 def unmask_v(n, r): return r if n == mask_s(r) else n
@@ -224,7 +234,8 @@ async def get_stats(u: str = Depends(get_current_user)):
             "use_polling": cfg.get('USE_POLLING'), "watch_mode": cfg.get('WATCH_MODE'), "run_interval": cfg.get('RUN_INTERVAL'), "run_on_startup": cfg.get('RUN_ON_STARTUP'),
             "start_time": cfg.get('START_TIME'), "incremental_scan": cfg.get('INCREMENTAL_SCAN'), "scan_since_days": cfg.get('SCAN_SINCE_DAYS'),
             "health_check": cfg.get('HEALTH_CHECK'), "symlink_check": cfg.get('SYMLINK_CHECK'), "ignore_samples": cfg.get('IGNORE_SAMPLES'),
-            "min_duration": cfg.get('MIN_DURATION'), "notifications_enabled": cfg.get('NOTIFICATIONS_ENABLED'),
+            "min_duration": cfg.get('MIN_DURATION'), "deletion_threshold": cfg.get('DELETION_THRESHOLD'), "abort_on_mass_deletion": cfg.get('ABORT_ON_MASS_DELETION'),
+            "notifications_enabled": cfg.get('NOTIFICATIONS_ENABLED'),
             "discord_webhook_url": mask_s(cfg.get('DISCORD_WEBHOOK_URL')), "ignore_patterns": "\n".join(cfg.get('IGNORE_PATTERNS', [])), "log_level": cfg.get('LOG_LEVEL')
         }
     }
@@ -279,6 +290,7 @@ async def update_settings(s: SettingsUpdate, u: str = Depends(get_current_user))
     c['USE_POLLING'] = s.use_polling; c['WATCH_MODE'] = s.watch_mode; c['RUN_INTERVAL'] = s.run_interval; c['RUN_ON_STARTUP'] = s.run_on_startup; c['START_TIME'] = s.start_time
     c['INCREMENTAL_SCAN'] = s.incremental_scan; c['SCAN_SINCE_DAYS'] = s.scan_since_days; c['HEALTH_CHECK'] = s.health_check
     c['SYMLINK_CHECK'] = s.symlink_check; c['IGNORE_SAMPLES'] = s.ignore_samples; c['MIN_DURATION'] = s.min_duration
+    c['DELETION_THRESHOLD'] = s.deletion_threshold; c['ABORT_ON_MASS_DELETION'] = s.abort_on_mass_deletion
     c['NOTIFICATIONS_ENABLED'] = s.notifications_enabled; c['DISCORD_WEBHOOK_URL'] = unmask_v(s.discord_webhook_url, c.get('DISCORD_WEBHOOK_URL', ''))
     c['IGNORE_PATTERNS'] = [p.strip() for p in s.ignore_patterns.replace(',', '\n').split('\n') if p.strip()]; c['LOG_LEVEL'] = s.log_level
     try:
@@ -292,6 +304,7 @@ async def update_settings(s: SettingsUpdate, u: str = Depends(get_current_user))
         cfg.set('behaviour', 'use_polling', str(c['USE_POLLING']).lower()); cfg.set('behaviour', 'watch', str(c['WATCH_MODE']).lower()); cfg.set('behaviour', 'run_interval', str(c['RUN_INTERVAL'])); cfg.set('behaviour', 'run_on_startup', str(c['RUN_ON_STARTUP']).lower())
         cfg.set('behaviour', 'start_time', c['START_TIME'] if c['START_TIME'] else ""); cfg.set('behaviour', 'incremental_scan', str(c['INCREMENTAL_SCAN']).lower()); cfg.set('behaviour', 'scan_since_days', str(c['SCAN_SINCE_DAYS']))
         cfg.set('behaviour', 'health_check', str(c['HEALTH_CHECK']).lower()); cfg.set('behaviour', 'symlink_check', str(c['SYMLINK_CHECK']).lower()); cfg.set('behaviour', 'ignore_samples', str(c['IGNORE_SAMPLES']).lower()); cfg.set('behaviour', 'min_duration', str(c['MIN_DURATION']))
+        cfg.set('behaviour', 'deletion_threshold', str(c['DELETION_THRESHOLD'])); cfg.set('behaviour', 'abort_on_mass_deletion', str(c['ABORT_ON_MASS_DELETION']).lower())
         cfg.set('notifications', 'enabled', str(c['NOTIFICATIONS_ENABLED']).lower()); cfg.set('notifications', 'discord_webhook_url', str(c['DISCORD_WEBHOOK_URL']))
         cfg.set('ignore', 'patterns', ",".join(c['IGNORE_PATTERNS'])); cfg.set('logs', 'loglevel', str(c['LOG_LEVEL']))
         with open('config.ini', 'w') as f: cfg.write(f)
@@ -479,10 +492,12 @@ async def webhook_trigger(request: Request):
             
             # Retry logic for filesystem latency (e.g. rclone mounts)
             exists = False
-            for _ in range(3):
+            for i in range(10):  # Increase to 10 seconds for slower mounts
                 if os.path.exists(p):
                     exists = True
                     break
+                if i % 3 == 0 and i > 0:
+                    logger.debug(f"Waiting for path to appear ({i}s): {p}")
                 await asyncio.sleep(1)
             
             if exists:

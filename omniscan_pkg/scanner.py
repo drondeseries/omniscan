@@ -11,9 +11,8 @@ from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
 import requests
 from plexapi.server import PlexServer
-import asyncio
 from datetime import datetime, timedelta
-from .notifications import send_discord_webhook, format_file_list
+from .notifications import send_discord_webhook_sync, format_file_list
 from discord import Embed, Color
 from .metrics import (
     SCANNED_FILES_TOTAL, MISSING_FILES_TOTAL, TRIGGERED_SCANS_TOTAL, 
@@ -82,17 +81,12 @@ class PlexScanner:
         if not self.config['NOTIFICATIONS_ENABLED'] or not self.config.get('DISCORD_WEBHOOK_URL'):
             return
 
-        async def _send():
-            try:
-                import aiohttp
-                async with aiohttp.ClientSession() as session:
-                    from discord import Webhook
-                    webhook = Webhook.from_url(self.config['DISCORD_WEBHOOK_URL'], session=session)
-                    await send_discord_webhook(webhook, embed, self.config)
-            except Exception as e:
-                logger.error(f"Failed to send notification in coroutine: {e}")
+        # Run in a separate thread to avoid blocking the main execution path
+        # But use synchronous requests which is more reliable across threads
+        def _send():
+            send_discord_webhook_sync(self.config['DISCORD_WEBHOOK_URL'], embed, self.config)
 
-        self._run_async(_send())
+        threading.Thread(target=_send, daemon=True).start()
 
     def send_single_notification(self, title, description, color):
         """Send a single-event notification to Discord."""
@@ -447,20 +441,6 @@ class PlexScanner:
             self.pending_scans[(library_id, folder_path)] = time.time()
             if is_new:
                 logger.info(f"⏳ Scan queued (debouncing): {BOLD}{folder_path}{RESET}")
-
-    def _run_async(self, coro):
-        """Safely run a coroutine from sync or async context."""
-        try:
-            try:
-                loop = asyncio.get_running_loop()
-                if loop.is_running():
-                    loop.create_task(coro)
-                    return
-            except RuntimeError:
-                pass
-            asyncio.run(coro)
-        except Exception as e:
-            logger.error(f"Async execution failed: {e}")
 
     def _process_scan_queue(self):
         """Background worker to process debounced scans and notifications."""
@@ -1151,15 +1131,28 @@ class PlexScanner:
                 for future in futures:
                     future.result()
 
+            # Mass Deletion Safety Check
+            if self.config.get('ABORT_ON_MASS_DELETION') and stats.total_missing > self.config.get('DELETION_THRESHOLD', 50):
+                msg = f"🛑 MASS DELETION DETECTED: {stats.total_missing} items missing. Aborting scan to protect library metadata."
+                logger.error(msg)
+                self.send_single_notification(
+                    "🚨 Scan Aborted (Safety Trigger)",
+                    f"Mass deletion threshold exceeded (**{stats.total_missing}** items missing).\n"
+                    f"Threshold: **{self.config.get('DELETION_THRESHOLD')}** items.\n\n"
+                    "Please check your mounts/storage. No library updates were triggered.",
+                    Color.red()
+                )
+                return
+
             if stats.total_missing > 0:
-                self._run_async(stats.send_discord_pending(len(folders_to_scan)))
+                stats.send_discord_pending(len(folders_to_scan))
                 
                 sorted_folders = sorted(list(folders_to_scan), key=lambda x: x[1])
                 for library_id, folder_path in sorted_folders:
                     self.trigger_scan(library_id, folder_path)
 
             tracker.save_history()
-            self._run_async(stats.send_discord_summary())
+            stats.send_discord_summary()
             
         except Exception as e:
             logger.error(f"Error during scan: {e}")

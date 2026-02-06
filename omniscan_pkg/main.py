@@ -128,7 +128,6 @@ def main():
         elif os.path.isdir(path):
             logger.info(f"Targeted scan for directory: {path}")
             from .models import RunStats
-            import asyncio
             
             stats = RunStats(config)
             tracker = StuckFileTracker()
@@ -142,7 +141,7 @@ def main():
                 for library_id, folder_path in sorted_folders:
                      scanner.trigger_scan(library_id, folder_path)
             
-            scanner._run_async(stats.send_discord_summary())
+            stats.send_discord_summary()
             
         else:
             logger.error(f"Path not found: {path}")

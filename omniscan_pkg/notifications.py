@@ -1,5 +1,8 @@
 import logging
 import os
+import requests
+import json
+from datetime import datetime
 from discord import Embed, Color
 
 logger = logging.getLogger(__name__)
@@ -37,98 +40,38 @@ def get_embed_length(embed):
         length += len(field.name) + len(field.value)
     return length
 
-async def send_discord_webhook(webhook, embed, config):
-    """Send a Discord webhook message."""
+def send_discord_webhook_sync(webhook_url, embed, config):
+    """Send a Discord webhook message synchronously using requests."""
     try:
-        # Check if embed exceeds Discord's limits
+        payload = {
+            "username": config.get('DISCORD_WEBHOOK_NAME', 'Omniscan'),
+            "avatar_url": config.get('DISCORD_AVATAR_URL'),
+            "embeds": []
+        }
+
+        # Check if embed exceeds Discord's character limit (6000)
         if get_embed_length(embed) > 6000:
-            # Split into multiple embeds
+            # Simple fallback: just send the base info
             base_embed = Embed(
                 title=embed.title,
+                description=embed.description,
                 color=embed.color,
                 timestamp=embed.timestamp
             )
+            if embed.fields:
+                # Add only the first field (usually overview)
+                base_embed.add_field(name=embed.fields[0].name, value=embed.fields[0].value, inline=False)
             
-            # Add overview field
-            if embed.fields and embed.fields[0].name == "📊 Overview":
-                base_embed.add_field(
-                    name=embed.fields[0].name,
-                    value=embed.fields[0].value,
-                    inline=False
-                )
+            payload["embeds"].append(base_embed.to_dict())
             
-            # Send base embed
-            await webhook.send(
-                embed=base_embed,
-                avatar_url=config['DISCORD_AVATAR_URL'],
-                username=config['DISCORD_WEBHOOK_NAME'],
-                wait=True
-            )
-            
-            # Create additional embeds for libraries
-            current_embed = Embed(
-                title="📁 Library Details",
-                color=embed.color,
-                timestamp=embed.timestamp
-            )
-            
-            # Add library fields
-            for field in embed.fields[1:]:
-                if field.name.startswith("📁"):
-                    if len(str(current_embed)) + len(str(field)) > 6000:
-                        # Send current embed and create new one
-                        await webhook.send(
-                            embed=current_embed,
-                            avatar_url=config['DISCORD_AVATAR_URL'],
-                            username=config['DISCORD_WEBHOOK_NAME'],
-                            wait=True
-                        )
-                        current_embed = Embed(
-                            title="📁 Library Details (continued)",
-                            color=embed.color,
-                            timestamp=embed.timestamp
-                        )
-                    current_embed.add_field(
-                        name=field.name,
-                        value=field.value,
-                        inline=field.inline
-                    )
-            
-            # Send final library embed if it has fields
-            if current_embed.fields:
-                await webhook.send(
-                    embed=current_embed,
-                    avatar_url=config['DISCORD_AVATAR_URL'],
-                    username=config['DISCORD_WEBHOOK_NAME'],
-                    wait=True
-                )
-            
-            # Send issues in separate embed if they exist
-            if embed.fields and embed.fields[-1].name == "⚠️ Issues":
-                issues_embed = Embed(
-                    title="⚠️ Issues",
-                    color=Color.red(),
-                    timestamp=embed.timestamp
-                )
-                issues_embed.add_field(
-                    name=embed.fields[-1].name,
-                    value=embed.fields[-1].value,
-                    inline=False
-                )
-                await webhook.send(
-                    embed=issues_embed,
-                    avatar_url=config['DISCORD_AVATAR_URL'],
-                    username=config['DISCORD_WEBHOOK_NAME'],
-                    wait=True
-                )
+            # Add a note about truncation
+            payload["embeds"][0]["footer"] = {"text": "Note: Some details were truncated due to Discord length limits."}
         else:
-            # Send single embed if within limits
-            await webhook.send(
-                embed=embed,
-                avatar_url=config['DISCORD_AVATAR_URL'],
-                username=config['DISCORD_WEBHOOK_NAME'],
-                wait=True
-            )
+            payload["embeds"].append(embed.to_dict())
+
+        response = requests.post(webhook_url, json=payload, timeout=10)
+        response.raise_for_status()
+        return True
     except Exception as e:
-        logger.error(f"Failed to send webhook: {str(e)}")
-        raise
+        logger.error(f"Failed to send sync webhook: {str(e)}")
+        return False
