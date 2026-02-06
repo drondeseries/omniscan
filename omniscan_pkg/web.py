@@ -492,11 +492,11 @@ async def webhook_trigger(request: Request):
             
             # Retry logic for filesystem latency (e.g. rclone mounts)
             exists = False
-            for i in range(10):  # Increase to 10 seconds for slower mounts
+            for i in range(30):  # Increase to 30 seconds for slower mounts
                 if os.path.exists(p):
                     exists = True
                     break
-                if i % 3 == 0 and i > 0:
+                if i % 5 == 0 and i > 0:
                     logger.debug(f"Waiting for path to appear ({i}s): {p}")
                 await asyncio.sleep(1)
             
@@ -512,16 +512,16 @@ async def webhook_trigger(request: Request):
                     else:
                         logger.warning(f"Webhook path not in library: {p}")
             else:
-                # If path doesn't exist, try falling back to parent folder if it looks like a file path
+                # If path doesn't exist, try falling back to parent folder
                 parent = os.path.dirname(p)
-                if os.path.isdir(parent):
+                lid, _, _ = scanner_instance.get_library_id_for_path(p)
+                
+                # Only fallback if parent exists AND is not the library root
+                if os.path.isdir(parent) and not scanner_instance.is_library_root(lid, parent):
                     logger.info(f"Webhook path missing, falling back to parent: {parent}")
-                    lid, _, _ = scanner_instance.get_library_id_for_path(parent)
                     if lid:
                         scanner_instance.trigger_scan(lid, parent)
                         triggered += 1
-                    else:
-                        logger.warning(f"Webhook path does not exist: {p}")
                 else:
                     logger.warning(f"Webhook path does not exist: {p}")
 
