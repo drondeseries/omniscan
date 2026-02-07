@@ -420,14 +420,32 @@ async def browser_act(d: dict, u: str = Depends(get_current_user)):
 async def test_webhook(data: dict, u: str = Depends(get_current_user)):
     url = data.get('url')
     if not url: return JSONResponse({"error": "No URL provided"}, status_code=400)
+    
     real_url = scanner_instance.config.get('DISCORD_WEBHOOK_URL', '')
-    if url == mask_s(real_url): url = real_url
-    if not url.startswith("http"): return JSONResponse({"error": "Invalid URL"}, status_code=400)
+    if url == mask_s(real_url): 
+        url = real_url
+        
+    if not url or not url.startswith("http"): 
+        return JSONResponse({"error": "Invalid URL"}, status_code=400)
+        
     try:
-        r = requests.post(url, json={"content": "✅ **Omniscan Test Message**\nYour notification configuration is working correctly!"}, timeout=5)
-        r.raise_for_status()
-        return {"status": "success"}
-    except Exception as e: return JSONResponse({"error": str(e)}, status_code=400)
+        from .notifications import send_discord_webhook_sync
+        from discord import Embed, Color
+        
+        embed = Embed(
+            title="✅ Omniscan Test Message",
+            description="Your notification configuration is working correctly!",
+            color=Color.green(),
+            timestamp=datetime.now()
+        )
+        embed.set_footer(text="Omniscan Media Monitor")
+        
+        if send_discord_webhook_sync(url, embed, scanner_instance.config):
+            return {"status": "success"}
+        else:
+            return JSONResponse({"error": "Failed to send webhook. Check logs for details."}, status_code=400)
+    except Exception as e: 
+        return JSONResponse({"error": str(e)}, status_code=400)
 
 @app.post("/api/validate-paths")
 async def validate_paths(data: dict, u: str = Depends(get_current_user)):
