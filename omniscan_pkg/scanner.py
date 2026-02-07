@@ -84,7 +84,10 @@ class PlexScanner:
         # Run in a separate thread to avoid blocking the main execution path
         # But use synchronous requests which is more reliable across threads
         def _send():
-            send_discord_webhook_sync(self.config['DISCORD_WEBHOOK_URL'], embed, self.config)
+            if send_discord_webhook_sync(self.config['DISCORD_WEBHOOK_URL'], embed, self.config):
+                logger.info(f"✅ Discord notification sent: {embed.title}")
+            else:
+                logger.error(f"❌ Failed to send Discord notification: {embed.title}")
 
         threading.Thread(target=_send, daemon=True).start()
 
@@ -460,11 +463,19 @@ class PlexScanner:
                             library_id, folder_path = key
                             to_trigger.append((library_id, folder_path))
                             
-                            # Collect notification data
-                            notif_data = self.pending_notifications.get(folder_path)
-                            if notif_data:
-                                ready_notifications.append((folder_path, notif_data))
-                                del self.pending_notifications[folder_path]
+                            # Collect notification data (including subfolders if this is a parent scan)
+                            # We use list(keys) to allow deletion during iteration
+                            found_notifs = 0
+                            for notif_path in list(self.pending_notifications.keys()):
+                                if notif_path == folder_path or notif_path.startswith(folder_path + os.sep):
+                                    notif_data = self.pending_notifications.get(notif_path)
+                                    if notif_data:
+                                        ready_notifications.append((notif_path, notif_data))
+                                        del self.pending_notifications[notif_path]
+                                        found_notifs += 1
+                            
+                            if found_notifs > 0:
+                                logger.info(f"🔔 Collected {found_notifs} notifications for scan: {folder_path}")
                                 
                             del self.pending_scans[key]
                 
