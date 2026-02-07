@@ -253,10 +253,11 @@ class RunStats:
 
             # Add library-specific stats
             for library, items in self.missing_items.items():
+                lib_name = library or "Unknown Library"
                 embed.add_field(
-                    name=f"📁 {library}",
-                    value=f"Found: **{len(items)}** items",
-                    inline=True
+                    name=f"📁 {lib_name} ({len(items)})",
+                    value=format_file_list(items, max_items=5, prefix="• ", code_block=True),
+                    inline=False
                 )
 
             # Add footer

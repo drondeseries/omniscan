@@ -860,6 +860,9 @@ class PlexScanner:
             if self.config.get('HEALTH_CHECK'):
                 is_healthy, health_status = self.check_file_health(file_path)
                 if not is_healthy:
+                    if health_status.get('status') == 'Ignored':
+                        return # Quietly ignore samples/short files
+
                     if stats: stats.add_corrupt_item(file_path)
                     error_reason = health_status.get('error', 'Unknown Error')
                     self.send_single_notification(
@@ -1020,9 +1023,10 @@ class PlexScanner:
 
                 if not self.is_in_library(file_path):
                     if self.config.get('HEALTH_CHECK'):
-                        is_healthy, _ = self.check_file_health(file_path)
+                        is_healthy, health_status = self.check_file_health(file_path)
                         if not is_healthy:
-                            stats.add_corrupt_item(file_path)
+                            if health_status.get('status') != 'Ignored':
+                                stats.add_corrupt_item(file_path)
                             # check_file_health handles logging
                             continue
 
@@ -1119,9 +1123,10 @@ class PlexScanner:
                                     
                                     if not self.is_in_library(file_path):
                                         if self.config.get('HEALTH_CHECK'):
-                                           is_healthy, _ = self.check_file_health(file_path)
+                                           is_healthy, health_status = self.check_file_health(file_path)
                                            if not is_healthy:
-                                               stats.add_corrupt_item(file_path)
+                                               if health_status.get('status') != 'Ignored':
+                                                   stats.add_corrupt_item(file_path)
                                                continue
 
                                         library_id, library_title, library_type = self.get_library_id_for_path(file_path)
