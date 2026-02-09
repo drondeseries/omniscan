@@ -761,7 +761,7 @@ class PlexScanner:
                 '-of', 'default=noprint_wrappers=1:nokey=1',
                 file_path
             ]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=self.config.get('SCAN_TIMEOUT', 60))
 
             if result.returncode != 0:
                 logger.warning(f"File corruption detected (ffprobe error): {file_path} - {result.stderr}")
