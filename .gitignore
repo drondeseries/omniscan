@@ -1,5 +1,6 @@
 # Configuration files
 config.ini
+*.bak
 
 # Python
 __pycache__/
