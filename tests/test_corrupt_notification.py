@@ -35,6 +35,7 @@ class TestCorruptNotification(unittest.TestCase):
         # Mock other dependencies
         self.scanner.is_in_library = MagicMock(return_value=False)
         self.scanner.is_ignored = MagicMock(return_value=False)
+        self.scanner.get_library_id_for_path = MagicMock(return_value=('1', 'Movies', 'movie'))
         
         stats = RunStats(self.config)
         

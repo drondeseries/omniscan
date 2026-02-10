@@ -233,6 +233,8 @@ class PlexScanner:
             items = []
             if section.type == 'show':
                 items = section.search(libtype='episode')
+            elif section.type == 'artist':
+                items = section.search(libtype='track')
             else:
                 items = section.all()
 
@@ -315,7 +317,12 @@ class PlexScanner:
             section = self.plex.library.sectionByID(int(library_id))
             
             # Use libtype based on section type for more accurate search
-            libtype = 'episode' if section.type == 'show' else 'movie'
+            if section.type == 'show':
+                libtype = 'episode'
+            elif section.type == 'artist':
+                libtype = 'track'
+            else:
+                libtype = 'movie'
             
             # Search by filename in title field as a fallback
             filename = os.path.basename(file_path)
@@ -430,6 +437,27 @@ class PlexScanner:
                 for location in section['locations']:
                     if os.path.normpath(folder_path) == os.path.normpath(location):
                         return True
+        return False
+
+    def should_scan_directory(self, dir_path):
+        """Check if a directory or any of its subdirectories belong to a library."""
+        if self.config.get('SERVER_TYPE') != 'plex':
+            return True # Fallback for other server types
+            
+        normalized_dir = os.path.normpath(dir_path)
+        
+        # 1. Is the directory itself in a library (or a subdirectory of one)?
+        lib_id, _, _ = self.get_library_id_for_path(normalized_dir)
+        if lib_id:
+            return True
+            
+        # 2. Is any library location a subdirectory of this directory?
+        for section in self.library_sections_cache:
+            for location in section['locations']:
+                normalized_location = os.path.normpath(location)
+                if normalized_location.startswith(normalized_dir + os.sep):
+                    return True
+                    
         return False
 
     def trigger_scan(self, library_id, folder_path, force=False):
@@ -850,6 +878,13 @@ class PlexScanner:
         if file_ext not in self.config['MEDIA_EXTENSIONS']:
             return
 
+        # NEW: Early Library Check
+        # Ensure the file actually belongs to a Plex library path before proceeding.
+        library_id, library_title, library_type = self.get_library_id_for_path(file_path)
+        if not library_id and self.config.get('SERVER_TYPE') == 'plex':
+            # Not in any Plex library, skip entirely.
+            return
+
         if stats: stats.increment_scanned()
         SCANNED_FILES_TOTAL.inc()
 
@@ -873,7 +908,6 @@ class PlexScanner:
                     return
 
             MISSING_FILES_TOTAL.inc()
-            library_id, library_title, library_type = self.get_library_id_for_path(file_path)
             
             if library_title or self.config.get('SERVER_TYPE') != 'plex':
                 should_scan = True
@@ -937,12 +971,13 @@ class PlexScanner:
             logger.debug(f"False positive deletion ignored (file reappeared): {file_path}")
             return
 
-        # Check if parent directory still exists. If the whole folder is gone, we might be seeing a recursive delete.
-        # But if the folder is gone, the file is definitely gone, so we proceed.
-        
+        # NEW: Early Library Check
+        library_id, library_title, library_type = self.get_library_id_for_path(file_path)
+        if not library_id and self.config.get('SERVER_TYPE') == 'plex':
+            return
+
         logger.info(f"🗑️ File deleted: {BOLD}{file_path}{RESET}")
         
-        library_id, library_title, library_type = self.get_library_id_for_path(file_path)
         if library_id or self.config.get('SERVER_TYPE') != 'plex':
             # Enqueue for notification
             parent_folder = os.path.dirname(file_path)
@@ -977,7 +1012,7 @@ class PlexScanner:
             
             # Prune ignored directories in-place to avoid traversing them
             # This is a significant optimization for large ignored trees (e.g. .git, extras)
-            dirs[:] = [d for d in dirs if not self.is_ignored(os.path.join(root, d))]
+            dirs[:] = [d for d in dirs if not self.is_ignored(os.path.join(root, d)) and self.should_scan_directory(os.path.join(root, d))]
             
             if self.config.get('INCREMENTAL_SCAN'):
                 try:
@@ -1007,6 +1042,13 @@ class PlexScanner:
                 if self.is_ignored(file_path):
                     continue
 
+                # NEW: Early Library Check
+                # Ensure the file actually belongs to a Plex library path before proceeding.
+                library_id, library_title, library_type = self.get_library_id_for_path(file_path)
+                if not library_id and self.config.get('SERVER_TYPE') == 'plex':
+                    # Not in any Plex library, skip entirely.
+                    continue
+
                 if self.config['SYMLINK_CHECK'] and self.is_broken_symlink(file_path):
                     stats.increment_broken_symlinks()
                     continue
@@ -1030,8 +1072,6 @@ class PlexScanner:
                             # check_file_health handles logging
                             continue
 
-                    library_id, library_title, library_type = self.get_library_id_for_path(file_path)
-                    
                     if library_title:
                         if tracker.increment_attempt(file_path):
                             stats.add_stuck_item(file_path)
@@ -1097,12 +1137,17 @@ class PlexScanner:
                                 if entry.name.startswith('.'): continue
                                 
                                 if entry.is_dir():
-                                    if not self.is_ignored(entry.path):
+                                    if not self.is_ignored(entry.path) and self.should_scan_directory(entry.path):
                                         futures.append(executor.submit(self.scan_directory, entry.path, stats, tracker, folders_to_scan, folders_to_scan_lock))
                                 elif entry.is_file():
                                     file_path = entry.path
                                     if self.is_ignored(file_path): continue
                                     
+                                    # NEW: Early Library Check
+                                    library_id, library_title, library_type = self.get_library_id_for_path(file_path)
+                                    if not library_id and self.config.get('SERVER_TYPE') == 'plex':
+                                        continue
+
                                     if self.config['SYMLINK_CHECK'] and self.is_broken_symlink(file_path):
                                         stats.increment_broken_symlinks()
                                         continue
@@ -1129,7 +1174,6 @@ class PlexScanner:
                                                    stats.add_corrupt_item(file_path)
                                                continue
 
-                                        library_id, library_title, library_type = self.get_library_id_for_path(file_path)
                                         if library_title:
                                             if tracker.increment_attempt(file_path):
                                                 stats.add_stuck_item(file_path)
