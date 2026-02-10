@@ -225,6 +225,11 @@ class PlexScanner:
             if library_id in self.library_files and self.library_files[library_id]:
                 return
         
+        server_type = self.config.get('SERVER_TYPE', 'plex')
+        if server_type in ['jellyfin', 'emby']:
+            self._cache_jellyfin_library(library_id)
+            return
+
         try:
             section = self.plex.library.sectionByID(int(library_id))
             logger.info(f"💾 Initializing cache for library {BOLD}{section.title}{RESET}...")
@@ -346,7 +351,7 @@ class PlexScanner:
             library_id, _, _ = self.get_library_id_for_path(file_path)
         if not library_id: return False
         
-        url = f"{self.config['SERVER_URL']}/Items?ParentId={library_id}&Recursive=true&Fields=Path&IncludeItemTypes=Movie,Episode"
+        url = f"{self.config['SERVER_URL']}/Items?ParentId={library_id}&Recursive=true&Fields=Path&IncludeItemTypes=Movie,Episode,Audio,MusicVideo"
         headers = {"X-Emby-Token": self.config['API_KEY']}
         try:
             # We don't want to fetch all items if we are just checking one
@@ -354,7 +359,7 @@ class PlexScanner:
             # For simplicity, if we don't have cache, we might have to use a targeted query
             # Search by term (filename) is often faster than fetching all
             filename = os.path.basename(file_path)
-            search_url = f"{self.config['SERVER_URL']}/Items?ParentId={library_id}&Recursive=true&Fields=Path&IncludeItemTypes=Movie,Episode&searchTerm={quote(filename)}"
+            search_url = f"{self.config['SERVER_URL']}/Items?ParentId={library_id}&Recursive=true&Fields=Path&IncludeItemTypes=Movie,Episode,Audio,MusicVideo&searchTerm={quote(filename)}"
             res = requests.get(search_url, headers=headers)
             res.raise_for_status()
             items = res.json().get('Items', [])
@@ -373,7 +378,8 @@ class PlexScanner:
     def _cache_jellyfin_library(self, library_id):
         try:
             # Fetch all items in this library (ParentId = library_id)
-            url = f"{self.config['SERVER_URL']}/Items?ParentId={library_id}&Recursive=true&Fields=Path&IncludeItemTypes=Movie,Episode"
+            # Include Music related types for completeness
+            url = f"{self.config['SERVER_URL']}/Items?ParentId={library_id}&Recursive=true&Fields=Path&IncludeItemTypes=Movie,Episode,Audio,MusicVideo,MusicAlbum"
             headers = {"X-Emby-Token": self.config['API_KEY']}
             res = requests.get(url, headers=headers)
             res.raise_for_status()
@@ -441,9 +447,6 @@ class PlexScanner:
 
     def should_scan_directory(self, dir_path):
         """Check if a directory or any of its subdirectories belong to a library."""
-        if self.config.get('SERVER_TYPE') != 'plex':
-            return True # Fallback for other server types
-            
         normalized_dir = os.path.normpath(dir_path)
         
         # 1. Is the directory itself in a library (or a subdirectory of one)?
@@ -879,10 +882,10 @@ class PlexScanner:
             return
 
         # NEW: Early Library Check
-        # Ensure the file actually belongs to a Plex library path before proceeding.
+        # Ensure the file actually belongs to a Plex/Jellyfin library path before proceeding.
         library_id, library_title, library_type = self.get_library_id_for_path(file_path)
-        if not library_id and self.config.get('SERVER_TYPE') == 'plex':
-            # Not in any Plex library, skip entirely.
+        if not library_id:
+            # Not in any library, skip entirely.
             return
 
         if stats: stats.increment_scanned()
@@ -973,7 +976,7 @@ class PlexScanner:
 
         # NEW: Early Library Check
         library_id, library_title, library_type = self.get_library_id_for_path(file_path)
-        if not library_id and self.config.get('SERVER_TYPE') == 'plex':
+        if not library_id:
             return
 
         logger.info(f"🗑️ File deleted: {BOLD}{file_path}{RESET}")
@@ -1043,10 +1046,10 @@ class PlexScanner:
                     continue
 
                 # NEW: Early Library Check
-                # Ensure the file actually belongs to a Plex library path before proceeding.
+                # Ensure the file actually belongs to a Plex/Jellyfin library path before proceeding.
                 library_id, library_title, library_type = self.get_library_id_for_path(file_path)
-                if not library_id and self.config.get('SERVER_TYPE') == 'plex':
-                    # Not in any Plex library, skip entirely.
+                if not library_id:
+                    # Not in any library, skip entirely.
                     continue
 
                 if self.config['SYMLINK_CHECK'] and self.is_broken_symlink(file_path):
@@ -1145,7 +1148,7 @@ class PlexScanner:
                                     
                                     # NEW: Early Library Check
                                     library_id, library_title, library_type = self.get_library_id_for_path(file_path)
-                                    if not library_id and self.config.get('SERVER_TYPE') == 'plex':
+                                    if not library_id:
                                         continue
 
                                     if self.config['SYMLINK_CHECK'] and self.is_broken_symlink(file_path):
