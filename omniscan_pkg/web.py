@@ -482,23 +482,36 @@ async def webhook_trigger(request: Request):
         logger.info(f"Webhook received: {data.keys()}")
         
         paths_to_scan = set()
+        raw_paths = set()
         
         # 1. Generic 'path' or 'paths'
-        if 'path' in data: paths_to_scan.add(data['path'])
-        if 'paths' in data and isinstance(data['paths'], list): paths_to_scan.update(data['paths'])
+        if 'path' in data: raw_paths.add(data['path'])
+        if 'paths' in data and isinstance(data['paths'], list): raw_paths.update(data['paths'])
         
         # 2. Sonarr/Radarr (Grab/Download/Rename)
         # Movie
-        if 'movie' in data and 'folderPath' in data['movie']: paths_to_scan.add(data['movie']['folderPath'])
-        if 'movieFile' in data and 'path' in data['movieFile']: paths_to_scan.add(data['movieFile']['path'])
+        if 'movie' in data and 'folderPath' in data['movie']: raw_paths.add(data['movie']['folderPath'])
+        if 'movieFile' in data and 'path' in data['movieFile']: raw_paths.add(data['movieFile']['path'])
         
         # Series
-        if 'series' in data and 'path' in data['series']: paths_to_scan.add(data['series']['path'])
-        if 'episodeFile' in data and 'path' in data['episodeFile']: paths_to_scan.add(data['episodeFile']['path'])
+        if 'series' in data and 'path' in data['series']: raw_paths.add(data['series']['path'])
+        if 'episodeFile' in data and 'path' in data['episodeFile']: raw_paths.add(data['episodeFile']['path'])
         
         # Rename (source/dest)
-        if 'sourcePath' in data: paths_to_scan.add(data['sourcePath'])
-        if 'destPath' in data: paths_to_scan.add(data['destPath'])
+        if 'sourcePath' in data: raw_paths.add(data['sourcePath'])
+        if 'destPath' in data: raw_paths.add(data['destPath'])
+
+        # De-duplicate: If we have /Show/Season/Ep and /Show, keep only /Show/Season/Ep
+        # This prevents full series scans when a single episode is updated.
+        sorted_paths = sorted([p for p in raw_paths if p], key=len, reverse=True)
+        for p in sorted_paths:
+            is_redundant = False
+            for existing in paths_to_scan:
+                if existing.startswith(p + os.sep) or existing == p:
+                    is_redundant = True
+                    break
+            if not is_redundant:
+                paths_to_scan.add(p)
 
         if not paths_to_scan:
             return JSONResponse({"status": "ignored", "message": "No paths found in payload"}, status_code=200)
@@ -532,14 +545,19 @@ async def webhook_trigger(request: Request):
             else:
                 # If path doesn't exist, try falling back to parent folder
                 parent = os.path.dirname(p)
-                lid, _, _ = scanner_instance.get_library_id_for_path(p)
+                lid, _, library_type = scanner_instance.get_library_id_for_path(p)
                 
                 # Only fallback if parent exists AND is not the library root
+                # For TV shows, we also avoid falling back to the "Show Root" folder if we can help it,
+                # as that triggers a full show scan. We'd rather wait or scan the Season folder.
                 if os.path.isdir(parent) and not scanner_instance.is_library_root(lid, parent):
-                    logger.info(f"Webhook path missing, falling back to parent: {parent}")
-                    if lid:
-                        scanner_instance.trigger_scan(lid, parent)
-                        triggered += 1
+                    if library_type == 'show' and scanner_instance.is_entity_root(parent):
+                        logger.info(f"Webhook path missing, but parent is Show Root. Stopping fallback to avoid broad scan: {parent}")
+                    else:
+                        logger.info(f"Webhook path missing, falling back to parent: {parent}")
+                        if lid:
+                            scanner_instance.trigger_scan(lid, parent)
+                            triggered += 1
                 else:
                     logger.warning(f"Webhook path does not exist: {p}")
 

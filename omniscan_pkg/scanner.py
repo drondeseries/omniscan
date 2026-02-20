@@ -445,6 +445,15 @@ class PlexScanner:
                         return True
         return False
 
+    def is_entity_root(self, folder_path):
+        """Check if the given folder is a top-level entity (Show or Movie folder) in its library."""
+        library_id, _, _ = self.get_library_id_for_path(folder_path)
+        if not library_id:
+            return False
+            
+        entity_root = self.get_entity_root(folder_path)
+        return os.path.normpath(folder_path) == os.path.normpath(entity_root)
+
     def should_scan_directory(self, dir_path):
         """Check if a directory or any of its subdirectories belong to a library."""
         normalized_dir = os.path.normpath(dir_path)
@@ -470,6 +479,14 @@ class PlexScanner:
             return
 
         with self.pending_scans_lock:
+            # OPTIMIZATION: Check if we already have a more specific scan pending (a child of this folder)
+            # This prevents broad scans (like Show root) from overriding specific ones (like Season)
+            # during the same debounce window.
+            for (pid, ppath) in self.pending_scans:
+                if pid == library_id and ppath.startswith(folder_path + os.sep):
+                    logger.debug(f"⏳ Skipping broad scan for {folder_path} as specific child {ppath} is already pending")
+                    return
+
             is_new = (library_id, folder_path) not in self.pending_scans
             # Update the last event time for this (library, folder)
             self.pending_scans[(library_id, folder_path)] = time.time()
