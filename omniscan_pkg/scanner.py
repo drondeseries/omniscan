@@ -3,8 +3,6 @@ import time
 import logging
 import fnmatch
 import threading
-import subprocess
-import random
 import gc
 from urllib.parse import quote
 from concurrent.futures import ThreadPoolExecutor
@@ -16,8 +14,7 @@ from .notifications import send_discord_webhook_sync, format_file_list
 from discord import Embed, Color
 from .metrics import (
     SCANNED_FILES_TOTAL, MISSING_FILES_TOTAL, TRIGGERED_SCANS_TOTAL, 
-    SCAN_ERRORS_TOTAL, WATCHED_DIRECTORIES, PENDING_SCANS,
-    HEALTH_CHECKS_TOTAL, HEALTH_CHECK_FAILURES
+    SCAN_ERRORS_TOTAL, WATCHED_DIRECTORIES, PENDING_SCANS
 )
 from .models import StuckFileTracker
 
@@ -57,7 +54,6 @@ class PlexScanner:
         self.pending_scans = {}
         self.pending_scans_lock = threading.Lock()
         self.pending_notifications = defaultdict(lambda: {'added': [], 'deleted': [], 'library_title': ''})
-        self.last_health_results = [] # Store last 20 health check results
         self.is_scanning = False # Track if a full scan is currently running
         
         # Persistent session for connection pooling
@@ -425,16 +421,13 @@ class PlexScanner:
             return os.path.dirname(file_path)
             
         rel_path = os.path.relpath(file_path, best_location)
-        parts = rel_path.split(os.sep)
+        parts = [p for p in rel_path.split(os.sep) if p and p != '.']
         
-        if len(parts) > 1:
-            # It's in a subfolder of the library root. 
-            # Usually Library/Show Name/Season/File or Library/Movie Name/File
-            # We return the first directory after the library root.
-            return os.path.join(best_location, parts[0])
-        else:
-            # It's directly in the library root or parts[0] is the file itself
+        if not parts:
             return best_location
+            
+        # The first part after the library root is the Entity (Show or Movie)
+        return os.path.join(best_location, parts[0])
 
     def is_library_root(self, library_id, folder_path):
         """Check if the given folder path is a root location for the library."""
@@ -756,115 +749,6 @@ class PlexScanner:
             return False
         return not os.path.exists(os.path.realpath(file_path))
 
-    def check_file_health(self, file_path):
-        """Check file integrity using tail-read, sampled reads, and ffprobe. Returns (is_healthy, status_dict)."""
-        HEALTH_CHECKS_TOTAL.inc()
-        health_status = {
-            "file": os.path.basename(file_path), 
-            "time": datetime.now().strftime("%H:%M:%S"),
-            "status": "Unknown"
-        }
-
-        try:
-            # 1. Check for 0-byte files
-            file_size = os.path.getsize(file_path)
-            if file_size == 0:
-                logger.warning(f"File corruption detected (0 bytes): {file_path}")
-                health_status.update({"status": "Corrupt", "error": "0 Bytes"})
-                self._add_health_result(health_status)
-                self.history.add_event("Health Check Failed", os.path.basename(file_path), "0 Bytes")
-                HEALTH_CHECK_FAILURES.inc()
-                return False, health_status
-
-            # 2. Hybrid Verification (Tail Read + Random Sampling)
-            # This is crucial for detecting truncated or sparse files on Rclone/Usenet
-            try:
-                with open(file_path, 'rb') as f:
-                    # A. Tail Read
-                    seek_pos = max(0, file_size - (1024 * 1024))
-                    f.seek(seek_pos)
-                    f.read(1024) 
-
-                    # B. Random Sampling (3 spots in the middle)
-                    if file_size > (5 * 1024 * 1024): # Only sample if > 5MB
-                        for _ in range(3):
-                            random_pos = random.randint(1024 * 1024, file_size - (1024 * 1024))
-                            f.seek(random_pos)
-                            if not f.read(1024):
-                                raise IOError("Empty read at sampled position")
-
-            except (OSError, IOError) as e:
-                logger.warning(f"Data verification failed (Read Error): {file_path} - {e}")
-                health_status.update({"status": "Corrupt", "error": "Incomplete/Read Error"})
-                self._add_health_result(health_status)
-                self.history.add_event("Health Check Failed", os.path.basename(file_path), "Incomplete")
-                HEALTH_CHECK_FAILURES.inc()
-                return False, health_status
-
-            # 3. FFprobe Metadata Check
-            cmd = [
-                'ffprobe', 
-                '-v', 'error', 
-                '-show_entries', 'format=duration', 
-                '-of', 'default=noprint_wrappers=1:nokey=1',
-                file_path
-            ]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=self.config.get('SCAN_TIMEOUT', 60))
-
-            if result.returncode != 0:
-                logger.warning(f"File corruption detected (ffprobe error): {file_path} - {result.stderr}")
-                HEALTH_CHECK_FAILURES.inc()
-                health_status.update({"status": "Corrupt", "error": "Bitstream Error"})
-                self._add_health_result(health_status)
-                self.history.add_event("Health Check Failed", os.path.basename(file_path), "Corrupt")
-                return False, health_status
-            
-            duration_str = result.stdout.strip()
-            if not duration_str:
-                logger.warning(f"File corruption detected (no duration): {file_path}")
-                health_status.update({"status": "Corrupt", "error": "No Duration"})
-                self._add_health_result(health_status)
-                self.history.add_event("Health Check Failed", os.path.basename(file_path), "No Duration")
-                return False, health_status
-            
-            # Sample Detection
-            if self.config.get('IGNORE_SAMPLES'):
-                try:
-                    duration = float(duration_str)
-                    if duration < self.config['MIN_DURATION']:
-                        logger.info(f"⏩ Ignoring sample/short file ({duration}s): {file_path}")
-                        health_status.update({"status": "Ignored", "error": f"Sample ({int(duration)}s)"})
-                        self._add_health_result(health_status)
-                        self.history.add_event("Sample Ignored", os.path.basename(file_path), f"{int(duration)}s")
-                        return False, health_status
-                except ValueError:
-                    pass
-            
-            health_status.update({"status": "Healthy"})
-            self._add_health_result(health_status)
-            self.history.add_event("Health Check Passed", os.path.basename(file_path), "Healthy")
-            return True, health_status
-
-        except subprocess.TimeoutExpired:
-            logger.warning(f"File health check timed out: {file_path}")
-            health_status.update({"status": "Timeout", "error": "Scan Timed Out"})
-            self._add_health_result(health_status)
-            self.history.add_event("Health Check Timeout", os.path.basename(file_path), "Timeout")
-            HEALTH_CHECK_FAILURES.inc()
-            return False, health_status
-        except Exception as e:
-            logger.error(f"Error running health check on {file_path}: {e}")
-            health_status.update({"status": "Error", "error": str(e)})
-            self._add_health_result(health_status)
-            self.history.add_event("Health Check Error", os.path.basename(file_path), "Error")
-            HEALTH_CHECK_FAILURES.inc()
-            return False, health_status
-
-    def _add_health_result(self, result):
-        self.last_health_results.insert(0, result)
-        if len(self.last_health_results) > 20:
-            self.last_health_results.pop()
-
     def submit_file_event(self, event_type, file_path):
         """Submit a file event for asynchronous processing."""
         if event_type == 'created' or event_type == 'moved':
@@ -885,14 +769,6 @@ class PlexScanner:
             if stats: stats.increment_broken_symlinks()
             return
 
-        try:
-            if os.path.getsize(file_path) == 0:
-                if stats: stats.add_corrupt_item(file_path)
-                logger.warning(f"Skipping empty file: {file_path}")
-                return
-        except OSError:
-            return
-
         file_name = os.path.basename(file_path)
         file_ext = os.path.splitext(file_name)[1].lower()
         if file_ext not in self.config['MEDIA_EXTENSIONS']:
@@ -911,22 +787,6 @@ class PlexScanner:
         if not self.is_in_library(file_path):
             logger.info(f"🆕 Found new file: {BOLD}{file_path}{RESET}")
             
-            # Health Check & Sample Detection
-            if self.config.get('HEALTH_CHECK'):
-                is_healthy, health_status = self.check_file_health(file_path)
-                if not is_healthy:
-                    if health_status.get('status') == 'Ignored':
-                        return # Quietly ignore samples/short files
-
-                    if stats: stats.add_corrupt_item(file_path)
-                    error_reason = health_status.get('error', 'Unknown Error')
-                    self.send_single_notification(
-                        "⚠️ Corrupt File Detected", 
-                        f"The file is corrupt or empty and will be skipped:\n**{os.path.basename(file_path)}**\nPath: `{file_path}`\nReason: {error_reason}", 
-                        Color.red()
-                    )
-                    return
-
             MISSING_FILES_TOTAL.inc()
             
             if library_title or self.config.get('SERVER_TYPE') != 'plex':
@@ -1073,25 +933,10 @@ class PlexScanner:
                     stats.increment_broken_symlinks()
                     continue
 
-                try:
-                    if os.path.getsize(file_path) == 0:
-                        stats.add_corrupt_item(file_path)
-                        continue
-                except OSError:
-                    continue
-
                 stats.increment_scanned()
                 SCANNED_FILES_TOTAL.inc()
 
                 if not self.is_in_library(file_path):
-                    if self.config.get('HEALTH_CHECK'):
-                        is_healthy, health_status = self.check_file_health(file_path)
-                        if not is_healthy:
-                            if health_status.get('status') != 'Ignored':
-                                stats.add_corrupt_item(file_path)
-                            # check_file_health handles logging
-                            continue
-
                     if library_title:
                         if tracker.increment_attempt(file_path):
                             stats.add_stuck_item(file_path)
@@ -1172,13 +1017,6 @@ class PlexScanner:
                                         stats.increment_broken_symlinks()
                                         continue
                                         
-                                    try:
-                                        if os.path.getsize(file_path) == 0:
-                                            stats.add_corrupt_item(file_path)
-                                            continue
-                                    except OSError:
-                                        continue
-                                        
                                     file_name = os.path.basename(file_path)
                                     file_ext = os.path.splitext(file_name)[1].lower()
                                     if file_ext not in self.config['MEDIA_EXTENSIONS']: continue
@@ -1187,13 +1025,6 @@ class PlexScanner:
                                     SCANNED_FILES_TOTAL.inc()
                                     
                                     if not self.is_in_library(file_path):
-                                        if self.config.get('HEALTH_CHECK'):
-                                           is_healthy, health_status = self.check_file_health(file_path)
-                                           if not is_healthy:
-                                               if health_status.get('status') != 'Ignored':
-                                                   stats.add_corrupt_item(file_path)
-                                               continue
-
                                         if library_title:
                                             if tracker.increment_attempt(file_path):
                                                 stats.add_stuck_item(file_path)

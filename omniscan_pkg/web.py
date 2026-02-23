@@ -18,7 +18,6 @@ from datetime import datetime
 from collections import deque
 from plexapi.server import PlexServer
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
-from .metrics import HEALTH_CHECKS_TOTAL
 
 logger = logging.getLogger(__name__)
 
@@ -167,8 +166,8 @@ async def clear_history(u: str = Depends(get_current_user)):
 class SettingsUpdate(BaseModel):
     server_type: str; server_url: str; api_key: str; plex_server: str; plex_token: str; scan_directories: str
     scan_workers: int; scan_debounce: int; scan_delay: float; use_polling: bool; watch_mode: bool; run_interval: int; run_on_startup: bool
-    start_time: Optional[str] = None; incremental_scan: bool; scan_since_days: int; health_check: bool; symlink_check: bool
-    ignore_samples: bool; min_duration: int; deletion_threshold: int; abort_on_mass_deletion: bool
+    start_time: Optional[str] = None; incremental_scan: bool; scan_since_days: int; symlink_check: bool
+    deletion_threshold: int; abort_on_mass_deletion: bool
     notifications_enabled: bool; discord_webhook_url: str; ignore_patterns: str; log_level: str
 
 def mask_s(v): return (v[:4] + "****" + v[-4:]) if v and len(v) >= 8 else "********"
@@ -207,24 +206,11 @@ async def get_stats(u: str = Depends(get_current_user)):
             count = len(scanner_instance.library_files.get(lib['id'], []))
             lib_stats.append({"title": lib['title'], "type": lib['type'], "count": count})
 
-    hs = {"healthy": 0, "corrupt": 0, "timeout": 0}
-    try:
-        conn = sqlite3.connect('history.db'); c = conn.cursor()
-        c.execute("SELECT status, COUNT(*) FROM events WHERE event_type LIKE 'Health Check%' GROUP BY status")
-        for row in c.fetchall():
-            s = row[0].lower()
-            if 'healthy' in s: hs['healthy'] = row[1]
-            elif 'corrupt' in s or 'failed' in s: hs['corrupt'] += row[1]
-            elif 'timeout' in s: hs['timeout'] = row[1]
-        conn.close()
-    except: pass
-    
     cfg = scanner_instance.config
     storage = await asyncio.get_event_loop().run_in_executor(None, get_storage_info, cfg.get('SCAN_PATHS', []))
 
     return {
         "libraries": lib_stats, "pending": p, "watching_count": len(cfg.get('SCAN_PATHS', [])), "watching_paths": cfg.get('SCAN_PATHS', []),
-        "health": {"recent": scanner_instance.last_health_results, "total": int(HEALTH_CHECKS_TOTAL._value.get()), "stats": hs},
         "storage": storage,
         "is_scanning": scanner_instance.is_scanning, "uptime": datetime.now().strftime("%H:%M:%S"),
         "config": {
@@ -233,8 +219,7 @@ async def get_stats(u: str = Depends(get_current_user)):
             "scan_workers": cfg.get('SCAN_WORKERS'), "scan_debounce": cfg.get('SCAN_DEBOUNCE'), "scan_delay": cfg.get('SCAN_DELAY'),
             "use_polling": cfg.get('USE_POLLING'), "watch_mode": cfg.get('WATCH_MODE'), "run_interval": cfg.get('RUN_INTERVAL'), "run_on_startup": cfg.get('RUN_ON_STARTUP'),
             "start_time": cfg.get('START_TIME'), "incremental_scan": cfg.get('INCREMENTAL_SCAN'), "scan_since_days": cfg.get('SCAN_SINCE_DAYS'),
-            "health_check": cfg.get('HEALTH_CHECK'), "symlink_check": cfg.get('SYMLINK_CHECK'), "ignore_samples": cfg.get('IGNORE_SAMPLES'),
-            "min_duration": cfg.get('MIN_DURATION'), "deletion_threshold": cfg.get('DELETION_THRESHOLD'), "abort_on_mass_deletion": cfg.get('ABORT_ON_MASS_DELETION'),
+            "symlink_check": cfg.get('SYMLINK_CHECK'), "deletion_threshold": cfg.get('DELETION_THRESHOLD'), "abort_on_mass_deletion": cfg.get('ABORT_ON_MASS_DELETION'),
             "notifications_enabled": cfg.get('NOTIFICATIONS_ENABLED'),
             "discord_webhook_url": mask_s(cfg.get('DISCORD_WEBHOOK_URL')), "ignore_patterns": "\n".join(cfg.get('IGNORE_PATTERNS', [])), "log_level": cfg.get('LOG_LEVEL')
         }
@@ -288,8 +273,8 @@ async def update_settings(s: SettingsUpdate, u: str = Depends(get_current_user))
     c['SCAN_PATHS'] = [p.strip() for p in s.scan_directories.replace(',', '\n').split('\n') if p.strip()]
     c['SCAN_WORKERS'] = s.scan_workers; c['SCAN_DEBOUNCE'] = s.scan_debounce; c['SCAN_DELAY'] = s.scan_delay
     c['USE_POLLING'] = s.use_polling; c['WATCH_MODE'] = s.watch_mode; c['RUN_INTERVAL'] = s.run_interval; c['RUN_ON_STARTUP'] = s.run_on_startup; c['START_TIME'] = s.start_time
-    c['INCREMENTAL_SCAN'] = s.incremental_scan; c['SCAN_SINCE_DAYS'] = s.scan_since_days; c['HEALTH_CHECK'] = s.health_check
-    c['SYMLINK_CHECK'] = s.symlink_check; c['IGNORE_SAMPLES'] = s.ignore_samples; c['MIN_DURATION'] = s.min_duration
+    c['INCREMENTAL_SCAN'] = s.incremental_scan; c['SCAN_SINCE_DAYS'] = s.scan_since_days
+    c['SYMLINK_CHECK'] = s.symlink_check
     c['DELETION_THRESHOLD'] = s.deletion_threshold; c['ABORT_ON_MASS_DELETION'] = s.abort_on_mass_deletion
     c['NOTIFICATIONS_ENABLED'] = s.notifications_enabled; c['DISCORD_WEBHOOK_URL'] = unmask_v(s.discord_webhook_url, c.get('DISCORD_WEBHOOK_URL', ''))
     c['IGNORE_PATTERNS'] = [p.strip() for p in s.ignore_patterns.replace(',', '\n').split('\n') if p.strip()]; c['LOG_LEVEL'] = s.log_level
@@ -303,7 +288,7 @@ async def update_settings(s: SettingsUpdate, u: str = Depends(get_current_user))
         cfg.set('behaviour', 'scan_workers', str(c['SCAN_WORKERS'])); cfg.set('behaviour', 'scan_debounce', str(c['SCAN_DEBOUNCE'])); cfg.set('behaviour', 'scan_delay', str(c['SCAN_DELAY']))
         cfg.set('behaviour', 'use_polling', str(c['USE_POLLING']).lower()); cfg.set('behaviour', 'watch', str(c['WATCH_MODE']).lower()); cfg.set('behaviour', 'run_interval', str(c['RUN_INTERVAL'])); cfg.set('behaviour', 'run_on_startup', str(c['RUN_ON_STARTUP']).lower())
         cfg.set('behaviour', 'start_time', c['START_TIME'] if c['START_TIME'] else ""); cfg.set('behaviour', 'incremental_scan', str(c['INCREMENTAL_SCAN']).lower()); cfg.set('behaviour', 'scan_since_days', str(c['SCAN_SINCE_DAYS']))
-        cfg.set('behaviour', 'health_check', str(c['HEALTH_CHECK']).lower()); cfg.set('behaviour', 'symlink_check', str(c['SYMLINK_CHECK']).lower()); cfg.set('behaviour', 'ignore_samples', str(c['IGNORE_SAMPLES']).lower()); cfg.set('behaviour', 'min_duration', str(c['MIN_DURATION']))
+        cfg.set('behaviour', 'symlink_check', str(c['SYMLINK_CHECK']).lower())
         cfg.set('behaviour', 'deletion_threshold', str(c['DELETION_THRESHOLD'])); cfg.set('behaviour', 'abort_on_mass_deletion', str(c['ABORT_ON_MASS_DELETION']).lower())
         cfg.set('notifications', 'enabled', str(c['NOTIFICATIONS_ENABLED']).lower()); cfg.set('notifications', 'discord_webhook_url', str(c['DISCORD_WEBHOOK_URL']))
         cfg.set('ignore', 'patterns', ",".join(c['IGNORE_PATTERNS'])); cfg.set('logs', 'loglevel', str(c['LOG_LEVEL']))
@@ -411,9 +396,6 @@ async def browser_act(d: dict, u: str = Depends(get_current_user)):
             else:
                 logger.warning(f"Scan ignored: Path not in any known library: {p}")
         return {"status": "success"}
-    elif a == 'health' and os.path.isfile(p):
-        _, res = await asyncio.get_event_loop().run_in_executor(None, scanner_instance.check_file_health, p)
-        return {"status": "success", "data": res}
     return {"error": "unknown"}
 
 @app.post("/api/test-webhook")
@@ -549,7 +531,7 @@ async def webhook_trigger(request: Request):
                 
                 # Only fallback if parent exists AND is not the library root
                 # For TV shows, we also avoid falling back to the "Show Root" folder if we can help it,
-                # as that triggers a full show scan. We'd rather wait or scan the Season folder.
+                # as that triggers a full show scan.
                 if os.path.isdir(parent) and not scanner_instance.is_library_root(lid, parent):
                     if library_type == 'show' and scanner_instance.is_entity_root(parent):
                         logger.info(f"Webhook path missing, but parent is Show Root. Stopping fallback to avoid broad scan: {parent}")
