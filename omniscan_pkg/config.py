@@ -54,7 +54,7 @@ def load_config(config_path='config.ini'):
     cfg['RUN_ON_STARTUP'] = get_config_val(config, 'RUN_ON_STARTUP', 'behaviour', 'run_on_startup', 'true', lambda x: str(x).lower() == 'true')
     cfg['DRY_RUN'] = get_config_val(config, 'DRY_RUN', 'behaviour', 'dry_run', 'false', lambda x: str(x).lower() == 'true')
     cfg['SCAN_WORKERS'] = get_config_val(config, 'SCAN_WORKERS', 'behaviour', 'scan_workers', 4, int)
-    cfg['SCAN_DEBOUNCE'] = get_config_val(config, 'SCAN_DEBOUNCE', 'behaviour', 'scan_debounce', 10, int)
+    cfg['SCAN_DEBOUNCE'] = get_config_val(config, 'SCAN_DEBOUNCE', 'behaviour', 'scan_debounce', 30, int)
     cfg['USE_POLLING'] = get_config_val(config, 'USE_POLLING', 'behaviour', 'use_polling', 'false', lambda x: str(x).lower() == 'true')
     cfg['WATCH_MODE'] = get_config_val(config, 'WATCH_MODE', 'behaviour', 'watch', 'false', lambda x: str(x).lower() == 'true')
     
@@ -81,9 +81,14 @@ def load_config(config_path='config.ini'):
     
     # Media extensions
     cfg['MEDIA_EXTENSIONS'] = {
+        # Video
         '.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm',
         '.m4v', '.m4p', '.m4b', '.m4r', '.3gp', '.mpg', '.mpeg',
-        '.m2v', '.m2ts', '.ts', '.vob', '.iso'
+        '.m2v', '.m2ts', '.ts', '.vob', '.iso', '.strm',
+        # Audio
+        '.mp3', '.flac', '.m4a', '.wav', '.ogg', '.opus', '.wma',
+        # Subtitles (Plex needs a scan to see new sidecar files)
+        '.srt', '.sub', '.ass', '.vtt'
     }
 
     return cfg

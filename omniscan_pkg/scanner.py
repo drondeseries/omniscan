@@ -4,6 +4,7 @@ import logging
 import fnmatch
 import threading
 import gc
+import queue
 from urllib.parse import quote
 from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
@@ -55,6 +56,8 @@ class PlexScanner:
         self.pending_scans_lock = threading.Lock()
         self.pending_notifications = defaultdict(lambda: {'added': [], 'deleted': [], 'library_title': ''})
         self.is_scanning = False # Track if a full scan is currently running
+        self.pending_files = set() # Track files currently queued for scan to prevent duplicates
+        self.pending_files_lock = threading.Lock()
         
         # Persistent session for connection pooling
         self.http_session = requests.Session()
@@ -72,20 +75,34 @@ class PlexScanner:
         self.worker_thread = threading.Thread(target=self._process_scan_queue, daemon=True)
         self.worker_thread.start()
 
+        # Notification queue and worker
+        self.notification_queue = queue.Queue()
+        self.notification_worker_thread = threading.Thread(target=self._notification_worker, daemon=True)
+        self.notification_worker_thread.start()
+
+    def _notification_worker(self):
+        """Sequential worker for sending Discord notifications to avoid rate limits."""
+        while True:
+            try:
+                embed = self.notification_queue.get()
+                if send_discord_webhook_sync(self.config['DISCORD_WEBHOOK_URL'], embed, self.config):
+                    logger.info(f"✅ Discord notification sent: {embed.title}")
+                else:
+                    logger.error(f"❌ Failed to send Discord notification: {embed.title}")
+                
+                # Small delay between notifications to be safe
+                time.sleep(1)
+                self.notification_queue.task_done()
+            except Exception as e:
+                logger.error(f"Error in notification worker: {e}")
+                time.sleep(5)
+
     def _send_discord_embed(self, embed):
-        """Send a constructed Embed to Discord."""
-        if not self.config['NOTIFICATIONS_ENABLED'] or not self.config.get('DISCORD_WEBHOOK_URL'):
+        """Queue a constructed Embed for the notification worker."""
+        if not self.config.get('NOTIFICATIONS_ENABLED', True) or not self.config.get('DISCORD_WEBHOOK_URL'):
             return
-
-        # Run in a separate thread to avoid blocking the main execution path
-        # But use synchronous requests which is more reliable across threads
-        def _send():
-            if send_discord_webhook_sync(self.config['DISCORD_WEBHOOK_URL'], embed, self.config):
-                logger.info(f"✅ Discord notification sent: {embed.title}")
-            else:
-                logger.error(f"❌ Failed to send Discord notification: {embed.title}")
-
-        threading.Thread(target=_send, daemon=True).start()
+        
+        self.notification_queue.put(embed)
 
     def send_single_notification(self, title, description, color):
         """Send a single-event notification to Discord."""
@@ -192,10 +209,11 @@ class PlexScanner:
 
     def get_library_id_for_path(self, file_path):
         """Get the library section ID and type for a given file path from cache."""
+        import pathlib
         best_match = None
         best_match_length = 0
         
-        normalized_scan_path = os.path.normpath(file_path)
+        path = pathlib.Path(os.path.normpath(file_path))
         
         for section in self.library_sections_cache:
             section_id = section['id']
@@ -203,12 +221,13 @@ class PlexScanner:
             section_type = section['type']
             
             for location_path in section['locations']:
-                normalized_location = os.path.normpath(location_path)
+                loc = pathlib.Path(os.path.normpath(location_path))
                 
-                if normalized_scan_path.startswith(normalized_location):
-                    if len(normalized_location) > best_match_length:
+                # Check if path is the location itself or a child of it
+                if loc == path or loc in path.parents:
+                    if len(str(loc)) > best_match_length:
                         best_match = (section_id, section_title, section_type)
-                        best_match_length = len(normalized_location)
+                        best_match_length = len(str(loc))
         
         if best_match:
             return best_match
@@ -216,7 +235,7 @@ class PlexScanner:
         return None, None, None
 
     def cache_library_files(self, library_id):
-        """Cache all files in a library section."""
+        """Cache all files in a library section using paginated fetching to save memory."""
         with self.library_files_lock:
             if library_id in self.library_files and self.library_files[library_id]:
                 return
@@ -231,25 +250,39 @@ class PlexScanner:
             logger.info(f"💾 Initializing cache for library {BOLD}{section.title}{RESET}...")
             cache_start = time.time()
             
-            items = []
-            if section.type == 'show':
-                items = section.search(libtype='episode')
-            elif section.type == 'artist':
-                items = section.search(libtype='track')
-            else:
-                items = section.all()
-
-            count = 0
+            batch_size = 5000
+            start = 0
             new_files = set()
-            for item in items:
-                for media in item.media:
-                    for part in media.parts:
-                        if part.file:
-                            new_files.add(os.path.normpath(part.file))
-                            count += 1
+            count = 0
             
-            # Clear items list immediately to free memory
-            del items
+            while True:
+                items = []
+                if section.type == 'show':
+                    items = section.search(libtype='episode', start=start, size=batch_size)
+                elif section.type == 'artist':
+                    items = section.search(libtype='track', start=start, size=batch_size)
+                else:
+                    items = section.all(start=start, size=batch_size)
+
+                if not items:
+                    break
+
+                for item in items:
+                    for media in item.media:
+                        for part in media.parts:
+                            if part.file:
+                                new_files.add(os.path.normpath(part.file))
+                                count += 1
+                
+                batch_count = len(items)
+                start += batch_count
+                
+                # Free memory after each batch
+                del items
+                gc.collect()
+
+                if batch_count < batch_size:
+                    break
 
             with self.library_files_lock:
                 self.library_files[library_id] = new_files
@@ -260,6 +293,8 @@ class PlexScanner:
             logger.error(f"Error caching library {library_id}: {str(e)}")
 
     def _trigger_cache_fill(self, library_id):
+        # Optimization: Only fill if notifications or stats need it, 
+        # but actually we almost always need it for is_in_library.
         with self.loading_lock:
             if library_id in self.loading_libraries:
                 return
@@ -285,7 +320,7 @@ class PlexScanner:
             
             # Ensure cache is loaded
             with self.library_files_lock:
-                cache_filled = library_id in self.library_files and self.library_files[library_id]
+                cache_filled = library_id in self.library_files
             
             if not cache_filled:
                 self._trigger_cache_fill(library_id)
@@ -296,7 +331,7 @@ class PlexScanner:
                     return self._is_in_jellyfin_api(file_path, library_id)
 
             with self.library_files_lock:
-                if library_id in self.library_files and self.library_files[library_id]:
+                if library_id in self.library_files and self.library_files[library_id] is not None:
                     return norm_path in self.library_files[library_id]
 
         # If cache check failed or library not found in cache, fallback to direct API check
@@ -372,25 +407,40 @@ class PlexScanner:
         return self.is_in_library(file_path)
 
     def _cache_jellyfin_library(self, library_id):
+        """Cache Jellyfin/Emby library using pagination to save memory."""
         try:
-            # Fetch all items in this library (ParentId = library_id)
-            # Include Music related types for completeness
-            url = f"{self.config['SERVER_URL']}/Items?ParentId={library_id}&Recursive=true&Fields=Path&IncludeItemTypes=Movie,Episode,Audio,MusicVideo,MusicAlbum"
-            headers = {"X-Emby-Token": self.config['API_KEY']}
-            res = requests.get(url, headers=headers)
-            res.raise_for_status()
-            data = res.json()
-            items = data.get('Items', [])
-            
             new_files = set()
-            for item in items:
-                if 'Path' in item:
-                    new_files.add(item['Path'])
+            batch_size = 5000
+            start_index = 0
             
-            # Clear large objects to free memory
-            del data
-            del items
+            while True:
+                # Fetch items in batches using StartIndex and Limit
+                url = f"{self.config['SERVER_URL']}/Items?ParentId={library_id}&Recursive=true&Fields=Path&IncludeItemTypes=Movie,Episode,Audio,MusicVideo,MusicAlbum&StartIndex={start_index}&Limit={batch_size}"
+                headers = {"X-Emby-Token": self.config['API_KEY']}
+                res = requests.get(url, headers=headers)
+                res.raise_for_status()
+                data = res.json()
+                items = data.get('Items', [])
+                
+                if not items:
+                    break
+                    
+                for item in items:
+                    if 'Path' in item:
+                        new_files.add(item['Path'])
+                
+                batch_count = len(items)
+                total_count = data.get('TotalRecordCount', 0)
+                start_index += batch_count
+                
+                # Clear large objects to free memory
+                del data
+                del items
+                gc.collect()
 
+                if batch_count < batch_size or start_index >= total_count:
+                    break
+            
             with self.library_files_lock:
                 self.library_files[library_id] = new_files
             
@@ -476,7 +526,8 @@ class PlexScanner:
             # This prevents broad scans (like Show root) from overriding specific ones (like Season)
             # during the same debounce window.
             for (pid, ppath) in self.pending_scans:
-                if pid == library_id and ppath.startswith(folder_path + os.sep):
+                # Use a separator check to ensure it's a subpath and not a partial string match
+                if pid == library_id and (ppath.startswith(folder_path + os.sep) or ppath == folder_path):
                     logger.debug(f"⏳ Skipping broad scan for {folder_path} as specific child {ppath} is already pending")
                     return
 
@@ -488,9 +539,16 @@ class PlexScanner:
 
     def _process_scan_queue(self):
         """Background worker to process debounced scans and notifications."""
+        last_gc = time.time()
         while True:
             try:
                 time.sleep(1)
+                
+                # Periodic memory cleanup
+                if time.time() - last_gc > 300: # Every 5 minutes
+                    gc.collect()
+                    last_gc = time.time()
+
                 to_trigger = []
                 ready_notifications = []
                 
@@ -499,29 +557,42 @@ class PlexScanner:
                     now = time.time()
                     debounce_delay = self.config.get('SCAN_DEBOUNCE', 10)
                     
+                    # 1. Process Scans that are ready
                     for key, last_time in list(self.pending_scans.items()):
                         if now - last_time >= debounce_delay:
                             library_id, folder_path = key
                             to_trigger.append((library_id, folder_path))
-                            
-                            # Collect notification data (including subfolders if this is a parent scan)
-                            # We use list(keys) to allow deletion during iteration
-                            found_notifs = 0
-                            for notif_path in list(self.pending_notifications.keys()):
-                                if notif_path == folder_path or notif_path.startswith(folder_path + os.sep):
-                                    notif_data = self.pending_notifications.get(notif_path)
-                                    if notif_data:
-                                        ready_notifications.append((notif_path, notif_data))
-                                        del self.pending_notifications[notif_path]
-                                        found_notifs += 1
-                            
-                            if found_notifs > 0:
-                                logger.info(f"🔔 Collected {found_notifs} notifications for scan: {folder_path}")
-                                
                             del self.pending_scans[key]
+
+                    # 2. Process Notifications that are ready
+                    # We send notifications after the same debounce delay as scans
+                    # to ensure they are grouped similarly.
+                    for notif_path, notif_data in list(self.pending_notifications.items()):
+                        # We use the time the last file was added to this notification group
+                        # (Stored implicitly by the fact that it's in pending_notifications)
+                        # Actually, we should track 'last_updated' for notifications too if we want perfect debouncing.
+                        # For now, let's trigger them if their associated folder is NOT in pending_scans
+                        # OR if enough time has passed.
+                        
+                        is_still_scoping = False
+                        for (pid, ppath) in self.pending_scans:
+                            if notif_path == ppath or notif_path.startswith(ppath + os.sep):
+                                is_still_scoping = True
+                                break
+                        
+                        if not is_still_scoping:
+                            # If no scan is pending for this folder, it's ready to notify
+                            ready_notifications.append((notif_path, notif_data))
+                            del self.pending_notifications[notif_path]
+                            
+                            # Clear pending files for these notifications
+                            with self.pending_files_lock:
+                                for f in notif_data['added'] + notif_data['deleted']:
+                                    self.pending_files.discard(os.path.normpath(f))
                 
                 # Send a single grouped notification for all ready folders
                 if ready_notifications:
+                    logger.info(f"🔔 Sending notifications for {len(ready_notifications)} folders")
                     self._send_multi_grouped_notification(ready_notifications)
 
                 for library_id, folder_path in to_trigger:
@@ -680,10 +751,28 @@ class PlexScanner:
 
         server_type = self.config.get('SERVER_TYPE', 'plex')
         
-        if server_type == 'plex':
-            self._trigger_plex_scan(library_id, folder_path)
-        elif server_type in ['jellyfin', 'emby']:
-            self._trigger_jellyfin_emby_scan(library_id, folder_path)
+        try:
+            if server_type == 'plex':
+                self._trigger_plex_scan(library_id, folder_path)
+            elif server_type in ['jellyfin', 'emby']:
+                self._trigger_jellyfin_emby_scan(library_id, folder_path)
+        finally:
+            # Clear cache for this library so it's re-indexed on next check
+            # This is critical to ensure that even if the scan took time or had minor issues,
+            # we don't rely on stale cache data.
+            with self.library_files_lock:
+                lib_id_str = str(library_id)
+                lib_id_int = None
+                try: lib_id_int = int(library_id)
+                except: pass
+
+                if lib_id_str in self.library_files:
+                    logger.debug(f"🧹 Invalidating cache (str) for library {lib_id_str} after scan")
+                    del self.library_files[lib_id_str]
+                
+                if lib_id_int is not None and lib_id_int in self.library_files:
+                    logger.debug(f"🧹 Invalidating cache (int) for library {lib_id_int} after scan")
+                    del self.library_files[lib_id_int]
 
     def _trigger_jellyfin_emby_scan(self, library_id, folder_path):
         """Trigger a scan for Jellyfin or Emby (they share similar path-based scan APIs)."""
@@ -785,6 +874,12 @@ class PlexScanner:
         SCANNED_FILES_TOTAL.inc()
 
         if not self.is_in_library(file_path):
+            norm_path = os.path.normpath(file_path)
+            with self.pending_files_lock:
+                if norm_path in self.pending_files:
+                    return
+                self.pending_files.add(norm_path)
+
             logger.info(f"🆕 Found new file: {BOLD}{file_path}{RESET}")
             
             MISSING_FILES_TOTAL.inc()
@@ -810,12 +905,6 @@ class PlexScanner:
                         if target_path not in self.pending_notifications:
                             self.pending_notifications[target_path]['library_title'] = library_title
                         self.pending_notifications[target_path]['added'].append(file_path)
-                    
-                    # Add to cache immediately to prevent duplicate triggers for the same file
-                    # before the Plex scan even finishes
-                    with self.library_files_lock:
-                        if library_id in self.library_files:
-                            self.library_files[library_id].add(os.path.normpath(file_path))
                     
                     self.trigger_scan(library_id, target_path)
         else:
@@ -859,6 +948,12 @@ class PlexScanner:
         logger.info(f"🗑️ File deleted: {BOLD}{file_path}{RESET}")
         
         if library_id or self.config.get('SERVER_TYPE') != 'plex':
+            norm_path = os.path.normpath(file_path)
+            with self.pending_files_lock:
+                if norm_path in self.pending_files:
+                    return
+                self.pending_files.add(norm_path)
+
             # Enqueue for notification
             parent_folder = os.path.dirname(file_path)
             
@@ -874,11 +969,6 @@ class PlexScanner:
                 if target_path not in self.pending_notifications:
                     self.pending_notifications[target_path]['library_title'] = library_title or "Media"
                 self.pending_notifications[target_path]['deleted'].append(file_path)
-
-            # Remove from cache immediately to prevent duplicate triggers
-            with self.library_files_lock:
-                if library_id in self.library_files:
-                    self.library_files[library_id].discard(os.path.normpath(file_path))
 
             self.trigger_scan(library_id, target_path)
 
@@ -1069,12 +1159,13 @@ class PlexScanner:
             logger.error(f"Error during scan: {e}")
         finally:
             self.is_scanning = False
-            # Only clear cache if NOT in watch mode.
-            # If watching, we want to keep the cache hot to avoid re-fetching on every event.
+            # Clear cache if NOT in watch mode.
             if not self.config.get('WATCH_MODE'):
                 with self.library_files_lock:
                     self.library_files.clear()
-                gc.collect() # Trigger garbage collection to release memory
             else:
                 logger.info("🧠 Retaining library cache for active watcher")
+            
+            # Always trigger garbage collection to release memory from scan objects
+            gc.collect()
         

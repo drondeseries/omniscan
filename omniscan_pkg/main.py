@@ -31,16 +31,25 @@ def parse_args():
 
 def setup_logging(config):
     # Determine log file path (in config dir)
-    log_file = os.path.join(os.getcwd(), 'omniscan.log')
+    log_dir = os.getcwd()
+    log_file = os.path.join(log_dir, 'omniscan.log')
     
     handlers = [logging.StreamHandler(sys.stdout)]
     
-    # Add file handler
-    file_handler = logging.handlers.RotatingFileHandler(
-        log_file, maxBytes=5*1024*1024, backupCount=5, encoding='utf-8'
-    )
-    file_handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s', datefmt='%d %b %Y | %I:%M:%S %p'))
-    handlers.append(file_handler)
+    # Add file handler with error handling
+    try:
+        # Check if we can write to the directory
+        if not os.access(log_dir, os.W_OK):
+            print(f"CRITICAL: No write access to {log_dir}. File logging will be disabled.")
+        else:
+            file_handler = logging.handlers.RotatingFileHandler(
+                log_file, maxBytes=5*1024*1024, backupCount=5, encoding='utf-8', delay=True
+            )
+            file_handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s', datefmt='%d %b %Y | %I:%M:%S %p'))
+            handlers.append(file_handler)
+            # print(f"DEBUG: File logging initialized for {log_file}")
+    except Exception as e:
+        print(f"CRITICAL: Failed to initialize file logging: {e}")
 
     logging.basicConfig(
         level=getattr(logging, config['LOG_LEVEL'].upper()),

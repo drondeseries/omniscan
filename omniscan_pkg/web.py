@@ -188,7 +188,8 @@ def get_storage_info(paths):
             if mount in usage: continue
             total, used, free = shutil.disk_usage(mount)
             usage[mount] = {"path": mount, "total": fmt_size(total), "used": fmt_size(used), "free": fmt_size(free), "percent": int((used/total)*100)}
-        except: pass
+        except Exception as e:
+            logger.debug(f"Failed to get storage info for {p}: {e}")
     return list(usage.values())
 
 @app.get("/api/stats")
@@ -342,7 +343,9 @@ async def list_f(path: str = None, query: str = None, u: str = Depends(get_curre
                                     "date": datetime.fromtimestamp(stat.st_mtime).strftime('%Y-%m-%d %H:%M'),
                                     "ext": os.path.splitext(name)[1].lower() if os.path.isfile(full_path) else None
                                 })
-                            except: continue
+                            except Exception as e:
+                                logger.debug(f"Failed to stat file during search: {full_path} - {e}")
+                                continue
                         if len(matches) >= 100: return matches
             return matches
 
@@ -371,7 +374,9 @@ async def list_f(path: str = None, query: str = None, u: str = Depends(get_curre
                     })
         it.sort(key=lambda x: (not x.get('is_back'), not x.get('is_dir'), x['name'].lower()))
         return {"current_path": str(rp), "items": it}
-    except: return JSONResponse({"error": "fail"}, status_code=500)
+    except Exception as e:
+        logger.error(f"Failed to list directory: {e}")
+        return JSONResponse({"error": "fail"}, status_code=500)
 
 @app.post("/api/browser/action")
 async def browser_act(d: dict, u: str = Depends(get_current_user)):
@@ -384,7 +389,9 @@ async def browser_act(d: dict, u: str = Depends(get_current_user)):
             if rp == bp or bp in rp.parents: allowed = True; break
         if not allowed or not rp.exists(): return JSONResponse({"error": "denied"}, status_code=403)
         p = str(rp)
-    except: return JSONResponse({"error": "invalid"}, status_code=400)
+    except Exception as e:
+        logger.error(f"Invalid path requested in browser action: {p} - {e}")
+        return JSONResponse({"error": "invalid"}, status_code=400)
     if a == 'scan':
         logger.info(f"Manual scan request for: {p}")
         if os.path.isfile(p): 

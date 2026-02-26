@@ -14,14 +14,33 @@ class PlexWatcher(FileSystemEventHandler):
     def on_created(self, event):
         if not event.is_directory:
             self.scanner.submit_file_event('created', event.src_path)
+        else:
+            logger.info(f"📁 Directory created: {event.src_path}")
+            # Trigger scan for the new directory
+            lid, _, _ = self.scanner.get_library_id_for_path(event.src_path)
+            if lid:
+                self.scanner.trigger_scan(lid, event.src_path)
 
     def on_moved(self, event):
         if not event.is_directory:
             self.scanner.submit_file_event('moved', event.dest_path)
+        else:
+            logger.info(f"📁 Directory moved/renamed: {event.src_path} -> {event.dest_path}")
+            # Trigger scan for the destination directory
+            lid, _, _ = self.scanner.get_library_id_for_path(event.dest_path)
+            if lid:
+                self.scanner.trigger_scan(lid, event.dest_path)
 
     def on_deleted(self, event):
         if not event.is_directory:
             self.scanner.submit_file_event('deleted', event.src_path)
+        else:
+            logger.info(f"📁 Directory deleted: {event.src_path}")
+            # Trigger scan for parent directory
+            parent = os.path.dirname(event.src_path)
+            lid, _, _ = self.scanner.get_library_id_for_path(parent)
+            if lid:
+                self.scanner.trigger_scan(lid, parent)
 
 def start_watcher(scanner):
     """Start the watchdog observer."""
