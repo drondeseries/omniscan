@@ -156,25 +156,36 @@ def main():
             logger.error(f"Path not found: {path}")
         sys.exit(0)
 
+    # Graceful Shutdown Handling
+    import signal
+    stop_event = threading.Event()
+
+    def signal_handler(signum, frame):
+        logger.info(f"🛑 Received signal {signum}, stopping...")
+        stop_event.set()
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    # Startup Watcher if enabled
     if args.watch or config.get('WATCH_MODE'):
         logger.info("🚀 Starting Real-time Watcher...")
         if not scanner.plex:
             scanner.connect_to_plex()
         scanner.get_library_ids()
 
-        if config['RUN_ON_STARTUP']:
-            logger.info("Running startup scan before starting watcher...")
-            # Run in a separate thread to not delay watcher start? 
-            # Or just run it. Let's run it synchronously to ensure clean state.
-            scanner.run_scan()
+        if config.get('RUN_ON_STARTUP'):
+            logger.info("Running startup scan...")
+            threading.Thread(target=scanner.run_scan, daemon=True).start()
 
-        start_watcher(scanner)
-        return
+        # Start watcher in background thread so it doesn't block the main thread scheduler/loop
+        watcher_thread = threading.Thread(target=start_watcher, args=(scanner, stop_event), daemon=True)
+        watcher_thread.start()
 
     # Default: Scheduled Mode
     logger.info(f"Will run every {BOLD}{config['RUN_INTERVAL']}{RESET} hours")
     
-    if config.get('RUN_ON_STARTUP'):
+    if config.get('RUN_ON_STARTUP') and not (args.watch or config.get('WATCH_MODE')):
         scanner.run_scan()
 
     if config['START_TIME']:
@@ -188,21 +199,6 @@ def main():
             schedule.every(config['RUN_INTERVAL']).hours.do(scanner.run_scan)
     else:
         schedule.every(config['RUN_INTERVAL']).hours.do(scanner.run_scan)
-    
-    # Graceful Shutdown Handling
-    import signal
-    stop_event = threading.Event()
-
-    def signal_handler(signum, frame):
-        logger.info(f"🛑 Received signal {signum}, stopping...")
-        stop_event.set()
-        # Attempt to stop watcher if running
-        # (Watcher runs in main thread if enabled, but here we are in main thread too?)
-        # Actually start_watcher blocks if watch mode is on.
-        # But if we are in schedule mode, we are in the loop below.
-    
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
 
     while not stop_event.is_set():
         schedule.run_pending()

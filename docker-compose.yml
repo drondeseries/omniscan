@@ -5,7 +5,6 @@ services:
     container_name: omniscan 
     image: omniscan:latest
     hostname: omniscan 
-    command: python -m omniscan_pkg.main --watch
     ports:
       - 8085:8000
     environment:

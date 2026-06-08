@@ -160,7 +160,7 @@ class PlexScanner:
             if not self.plex: return {}
             for section in self.plex.library.sections():
                 lib_type = section.type
-                lib_key = section.key
+                lib_key = str(section.key)
                 lib_title = section.title
                 self.library_ids[lib_type] = lib_key
                 
@@ -236,6 +236,7 @@ class PlexScanner:
 
     def cache_library_files(self, library_id):
         """Cache all files in a library section using paginated fetching to save memory."""
+        library_id = str(library_id)
         with self.library_files_lock:
             if library_id in self.library_files and self.library_files[library_id]:
                 return

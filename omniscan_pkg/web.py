@@ -48,7 +48,34 @@ def set_scanner(scanner):
     global scanner_instance
     scanner_instance = scanner
 
+def is_setup_completed():
+    if not scanner_instance: return False
+    config_pass = scanner_instance.config.get('WEB_PASSWORD')
+    return bool(config_pass and config_pass.strip())
+
+class SettingsUpdate(BaseModel):
+    server_type: str; server_url: str; api_key: str; plex_server: str; plex_token: str; scan_directories: str
+    scan_workers: int; scan_debounce: int; scan_delay: float; use_polling: bool; watch_mode: bool; run_interval: int; run_on_startup: bool
+    start_time: Optional[str] = None; incremental_scan: bool; scan_since_days: int; symlink_check: bool
+    deletion_threshold: int; abort_on_mass_deletion: bool
+    notifications_enabled: bool; discord_webhook_url: str; ignore_patterns: str; log_level: str; path_rewrites: str
+    integrity_check: bool; ffprobe_check: bool
+
+class SetupSubmit(BaseModel):
+    username: str
+    password: str
+    server_type: str
+    plex_server: str
+    plex_token: str
+    server_url: str
+    api_key: str
+    scan_directories: str
+
 def get_current_user(request: Request):
+    if not is_setup_completed():
+        if request.url.path.startswith("/api"):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Setup required")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Setup required")
     user = request.session.get("user")
     if user: return user
     if request.url.path.startswith("/api"): raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
@@ -121,14 +148,79 @@ async def websocket_endpoint(websocket: WebSocket):
 ws_handler = WebSocketLogHandler()
 ws_handler.setFormatter(logging.Formatter('%(asctime)s | %(message)s', datefmt='%d %b %Y | %I:%M:%S %p'))
 
+@app.get("/setup", response_class=HTMLResponse)
+async def setup_page(request: Request):
+    if is_setup_completed():
+        return RedirectResponse(url="/", status_code=status.HTTP_302_FOUND)
+    return load_template("setup.html")
+
+@app.post("/api/test-connection-unauthenticated")
+async def test_conn_unauth(s: SettingsUpdate):
+    if is_setup_completed():
+        raise HTTPException(status_code=403, detail="Forbidden")
+    try:
+        if s.server_type == 'plex':
+            plex = PlexServer(s.plex_server, s.plex_token); return {"status": "success", "message": f"Linked to {plex.friendlyName}"}
+        else:
+            r = requests.get(f"{s.server_url}/System/Info", headers={"X-Emby-Token": s.api_key}, timeout=5); r.raise_for_status()
+            return {"status": "success", "message": f"Linked to {s.server_type.capitalize()}"}
+    except Exception as e: return JSONResponse({"status": "error", "message": str(e)}, status_code=400)
+
+@app.post("/api/setup")
+async def setup_submit(r: SetupSubmit, request: Request):
+    if is_setup_completed():
+        return JSONResponse({"status": "error", "error": "Setup already completed"}, status_code=400)
+    if not r.password.strip():
+        return JSONResponse({"status": "error", "error": "Password cannot be empty"}, status_code=400)
+        
+    c = scanner_instance.config
+    c['WEB_USERNAME'] = r.username
+    c['WEB_PASSWORD'] = r.password
+    c['SERVER_TYPE'] = r.server_type
+    c['PLEX_URL'] = r.plex_server
+    c['TOKEN'] = r.plex_token
+    c['SERVER_URL'] = r.server_url
+    c['API_KEY'] = r.api_key
+    c['SCAN_PATHS'] = [p.strip() for p in r.scan_directories.replace(',', '\n').split('\n') if p.strip()]
+
+    try:
+        cfg = configparser.ConfigParser(); cfg.read('config.ini')
+        for sec in ['server', 'plex', 'behaviour', 'notifications', 'scan', 'ignore', 'logs', 'rewrite', 'web']:
+            if not cfg.has_section(sec): cfg.add_section(sec)
+        cfg.set('web', 'username', str(c['WEB_USERNAME']))
+        cfg.set('web', 'password', str(c['WEB_PASSWORD']))
+        cfg.set('server', 'type', str(c['SERVER_TYPE']))
+        cfg.set('server', 'url', str(c['SERVER_URL']))
+        cfg.set('server', 'api_key', str(c['API_KEY']))
+        cfg.set('plex', 'server', str(c['PLEX_URL']))
+        cfg.set('plex', 'token', str(c['TOKEN']))
+        cfg.set('scan', 'directories', ",".join(c['SCAN_PATHS']))
+        
+        with open('config.ini', 'w') as f: cfg.write(f)
+        
+        # Re-initialize backend configurations
+        if c['SERVER_TYPE'] == 'plex':
+            scanner_instance.connect_to_plex(retry=False)
+            scanner_instance.get_library_ids()
+        
+        # Log user in
+        request.session["user"] = r.username
+        return {"status": "success"}
+    except Exception as e:
+        return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+
 @app.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request, error: Optional[str] = None):
+    if not is_setup_completed():
+        return RedirectResponse(url="/setup", status_code=status.HTTP_302_FOUND)
     html = load_template("login.html")
     err_h = f'<div class="bg-red-500/10 p-4 mb-6 rounded-xl border border-red-500/20 text-red-400 text-xs font-bold uppercase">{error}</div>' if error else ""
     return html.replace("__ERROR__", err_h)
 
 @app.post("/login")
 async def login(request: Request, username: str = Form(...), password: str = Form(...)):
+    if not is_setup_completed():
+        return RedirectResponse(url="/setup", status_code=status.HTTP_302_FOUND)
     if verify_credentials(username, password):
         request.session["user"] = username
         return RedirectResponse(url="/", status_code=status.HTTP_303_SEE_OTHER)
@@ -162,14 +254,6 @@ async def clear_history(u: str = Depends(get_current_user)):
         conn.close()
         return {"status": "success"}
     except Exception as e: return JSONResponse({"error": str(e)}, status_code=500)
-
-class SettingsUpdate(BaseModel):
-    server_type: str; server_url: str; api_key: str; plex_server: str; plex_token: str; scan_directories: str
-    scan_workers: int; scan_debounce: int; scan_delay: float; use_polling: bool; watch_mode: bool; run_interval: int; run_on_startup: bool
-    start_time: Optional[str] = None; incremental_scan: bool; scan_since_days: int; symlink_check: bool
-    deletion_threshold: int; abort_on_mass_deletion: bool
-    notifications_enabled: bool; discord_webhook_url: str; ignore_patterns: str; log_level: str; path_rewrites: str
-    integrity_check: bool; ffprobe_check: bool
 
 def mask_s(v): return (v[:4] + "****" + v[-4:]) if v and len(v) >= 8 else "********"
 def unmask_v(n, r): return r if n == mask_s(r) else n
@@ -607,6 +691,8 @@ async def webhook_trigger(request: Request):
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
+    if not is_setup_completed():
+        return RedirectResponse(url="/setup", status_code=status.HTTP_302_FOUND)
     if not request.session.get("user"): return RedirectResponse(url="/login", status_code=status.HTTP_302_FOUND)
     return load_template("index.html")
 

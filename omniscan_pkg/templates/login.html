@@ -1,1 +1,73 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>Omniscan Login</title><script src="https://cdn.tailwindcss.com"></script><style>body{background:#080a10;color:#e2e8f0;font-family:sans-serif}.input-field{background:#111827;border:1px solid #1f2937;color:white}.input-field:focus{outline:none;border-color:#3b82f6}</style></head><body class="flex items-center justify-center h-screen"><div class="bg-[#0c111d] p-8 rounded-3xl shadow-2xl w-full max-w-md border border-slate-800"><div class="flex flex-col items-center mb-8"><img src="/assets/logo.png" class="w-16 h-16 rounded-2xl mb-4 shadow-blue-500/20 shadow-lg" alt="Logo"><h1 class="text-2xl font-bold tracking-tight">Omniscan</h1><p class="text-slate-500 text-[10px] font-black uppercase mt-1">System Access</p></div>__ERROR__<form action="/login" method="post" class="space-y-6"><div><label class="block text-[10px] font-black text-slate-500 uppercase mb-2">Username</label><input type="text" name="username" class="input-field w-full p-4 rounded-xl text-sm" required autofocus></div><div><label class="block text-[10px] font-black text-slate-500 uppercase mb-2">Password</label><input type="password" name="password" class="input-field w-full p-4 rounded-xl text-sm" required></div><button type="submit" class="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-4 rounded-xl shadow-lg transition-all active:scale-95">Authenticate</button></form></div></body></html>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Omniscan Login</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800;900&display=swap');
+        body {
+            font-family: 'Outfit', sans-serif;
+            background: radial-gradient(circle at center, #0f172a 0%, #020617 100%);
+            color: #f8fafc;
+        }
+        .login-card {
+            background: rgba(15, 23, 42, 0.65);
+            backdrop-filter: blur(16px);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+        }
+        .input-field {
+            background: rgba(30, 41, 59, 0.5) !important;
+            border: 1px solid rgba(255, 255, 255, 0.08) !important;
+            color: #fff !important;
+            transition: all 0.2s ease;
+        }
+        .input-field:focus {
+            border-color: #0ea5e9 !important;
+            box-shadow: 0 0 0 2px rgba(14, 165, 233, 0.2) !important;
+            outline: none !important;
+        }
+        .glow-accent {
+            position: absolute;
+            border-radius: 9999px;
+            filter: blur(100px);
+            opacity: 0.1;
+            pointer-events: none;
+            z-index: 0;
+        }
+    </style>
+</head>
+<body class="flex items-center justify-center min-h-screen p-4 overflow-hidden relative">
+    <!-- Ambient background glows -->
+    <div class="glow-accent w-[350px] h-[350px] bg-blue-500 -top-20 -left-20"></div>
+    <div class="glow-accent w-[350px] h-[350px] bg-indigo-500 -bottom-20 -right-20"></div>
+
+    <div class="login-card w-full max-w-md rounded-3xl p-8 lg:p-10 relative z-10">
+        <div class="flex flex-col items-center mb-8">
+            <img src="/assets/logo.png" class="w-16 h-16 rounded-2xl mb-4 shadow-xl shadow-blue-500/10" alt="Logo">
+            <h1 class="text-3xl font-extrabold tracking-tight bg-gradient-to-r from-white to-slate-400 bg-clip-text text-transparent">Omniscan</h1>
+            <p class="text-slate-400 text-xs font-bold uppercase tracking-wider mt-1">System Access</p>
+        </div>
+
+        __ERROR__
+
+        <form action="/login" method="post" class="space-y-6">
+            <div>
+                <label class="block text-[10px] font-black text-slate-400 uppercase tracking-wider mb-2">Username</label>
+                <input type="text" name="username" class="input-field w-full p-4 rounded-xl text-sm" placeholder="admin" required autofocus>
+            </div>
+            <div>
+                <label class="block text-[10px] font-black text-slate-400 uppercase tracking-wider mb-2">Password</label>
+                <input type="password" name="password" class="input-field w-full p-4 rounded-xl text-sm" placeholder="••••••••••••" required>
+            </div>
+            <button type="submit" class="w-full bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-bold py-4 rounded-xl shadow-lg transition-all active:scale-95 flex items-center justify-center gap-2">
+                <span>Authenticate</span>
+                <i class="fas fa-right-to-bracket text-sm"></i>
+            </button>
+        </form>
+    </div>
+</body>
+</html>

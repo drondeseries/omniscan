@@ -15,6 +15,7 @@ class TestPlexScanner(unittest.TestCase):
             'TOKEN': 'mock_token',
             'IGNORE_PATTERNS': ['*.tmp', 'sample*'],
             'MEDIA_EXTENSIONS': {'.mkv', '.mp4'},
+            'LIBRARY_EXTENSIONS': {'.mkv', '.mp4'},
             'SYMLINK_CHECK': True,
             'SCAN_PATHS': ['/data'],
             'NOTIFICATIONS_ENABLED': False,
