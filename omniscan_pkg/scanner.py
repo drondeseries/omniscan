@@ -49,6 +49,7 @@ class PlexScanner:
         self.library_paths = {}
         self.library_sections_cache = []
         self.library_files = {} # Changed to dict for easier clearing
+        self.library_counts = {} # Store last known counts when cache is invalidated
         self.library_files_lock = threading.Lock()
         self.loading_libraries = set()
         self.loading_lock = threading.Lock()
@@ -287,6 +288,7 @@ class PlexScanner:
 
             with self.library_files_lock:
                 self.library_files[library_id] = new_files
+                self.library_counts[library_id] = len(new_files)
 
             cache_time = time.time() - cache_start
             logger.info(f"💾 Cache initialized for library {BOLD}{section.title}{RESET}: {BOLD}{count}{RESET} files in {BOLD}{cache_time:.2f}{RESET} seconds")
@@ -444,6 +446,7 @@ class PlexScanner:
             
             with self.library_files_lock:
                 self.library_files[library_id] = new_files
+                self.library_counts[library_id] = len(new_files)
             
             logger.info(f"💾 Cached {len(new_files)} items for {self.config['SERVER_TYPE']} library {library_id}")
         except Exception as e:

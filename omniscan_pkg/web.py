@@ -289,7 +289,10 @@ async def get_stats(u: str = Depends(get_current_user)):
     lib_stats = []
     with scanner_instance.library_files_lock:
         for lib in scanner_instance.library_sections_cache:
-            count = len(scanner_instance.library_files.get(lib['id'], []))
+            lid = lib['id']
+            if lid not in scanner_instance.library_files:
+                scanner_instance._trigger_cache_fill(lid)
+            count = scanner_instance.library_counts.get(lid, len(scanner_instance.library_files.get(lid, [])))
             lib_stats.append({"title": lib['title'], "type": lib['type'], "count": count})
 
     cfg = scanner_instance.config
