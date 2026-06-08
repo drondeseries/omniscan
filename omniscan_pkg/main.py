@@ -27,6 +27,7 @@ def parse_args():
     parser.add_argument('--dry-run', action='store_true', help="Enable dry run mode (no Plex triggers)")
     parser.add_argument('--list-stuck', action='store_true', help="List all files marked as stuck")
     parser.add_argument('--clear-stuck', action='store_true', help="Clear all stuck files from history")
+    parser.add_argument('--tui', action='store_true', help="Launch interactive Terminal User Interface (TUI)")
     return parser.parse_args()
 
 def setup_logging(config):
@@ -62,6 +63,11 @@ def setup_logging(config):
 def main():
     args = parse_args()
     
+    if args.tui:
+        from .tui import main as tui_main
+        tui_main()
+        sys.exit(0)
+        
     # Load config
     config = load_config('config.ini')
     
