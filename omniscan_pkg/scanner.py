@@ -848,6 +848,41 @@ class PlexScanner:
             return False
         return not os.path.exists(os.path.realpath(file_path))
 
+    def check_file_integrity(self, file_path):
+        """Check if file is valid (not 0-byte, and optionally passes ffprobe)."""
+        if not self.config.get('INTEGRITY_CHECK'):
+            return True, None
+
+        try:
+            if not os.path.exists(file_path):
+                return False, "file not found"
+            
+            # 1. 0-byte check
+            size = os.path.getsize(file_path)
+            if size == 0:
+                return False, "0-byte file"
+        except Exception as e:
+            return False, f"error reading size: {e}"
+
+        # 2. ffprobe check
+        if self.config.get('FFPROBE_CHECK'):
+            import subprocess
+            try:
+                cmd = ["ffprobe", "-v", "error", "-show_format", "-show_streams", file_path]
+                res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5)
+                if res.returncode != 0:
+                    err_msg = res.stderr.strip() if res.stderr else f"exit code {res.returncode}"
+                    return False, f"ffprobe error: {err_msg}"
+            except subprocess.TimeoutExpired:
+                return False, "ffprobe timeout"
+            except FileNotFoundError:
+                logger.warning("ffprobe command not found. Please ensure ffmpeg is installed.")
+                return True, None
+            except Exception as e:
+                return False, f"ffprobe exception: {str(e)}"
+
+        return True, None
+
     def submit_file_event(self, event_type, file_path):
         """Submit a file event for asynchronous processing."""
         if event_type == 'created' or event_type == 'moved':
@@ -884,6 +919,15 @@ class PlexScanner:
         SCANNED_FILES_TOTAL.inc()
 
         if not self.is_in_library(file_path):
+            is_valid, reason = self.check_file_integrity(file_path)
+            if not is_valid:
+                logger.warning(f"❌ File failed integrity validation ({reason}): {file_path}")
+                if tracker:
+                    tracker.add_event("Corrupt", file_path, reason)
+                if stats:
+                    stats.add_corrupt_item(file_path, reason)
+                return
+
             norm_path = os.path.normpath(file_path)
             with self.pending_files_lock:
                 if norm_path in self.pending_files:
@@ -1039,6 +1083,13 @@ class PlexScanner:
                 SCANNED_FILES_TOTAL.inc()
 
                 if not self.is_in_library(file_path):
+                    is_valid, reason = self.check_file_integrity(file_path)
+                    if not is_valid:
+                        logger.warning(f"❌ File failed integrity validation ({reason}): {file_path}")
+                        tracker.add_event("Corrupt", file_path, reason)
+                        stats.add_corrupt_item(file_path, reason)
+                        continue
+
                     if library_title:
                         if tracker.increment_attempt(file_path):
                             stats.add_stuck_item(file_path)
@@ -1127,6 +1178,13 @@ class PlexScanner:
                                     SCANNED_FILES_TOTAL.inc()
                                     
                                     if not self.is_in_library(file_path):
+                                        is_valid, reason = self.check_file_integrity(file_path)
+                                        if not is_valid:
+                                            logger.warning(f"❌ File failed integrity validation ({reason}): {file_path}")
+                                            tracker.add_event("Corrupt", file_path, reason)
+                                            stats.add_corrupt_item(file_path, reason)
+                                            continue
+
                                         if library_title:
                                             if tracker.increment_attempt(file_path):
                                                 stats.add_stuck_item(file_path)

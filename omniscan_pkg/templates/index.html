@@ -71,7 +71,7 @@
 
         <div id="content-scroll" class="flex-grow overflow-y-auto p-4 lg:p-10">
             <div id="view-dashboard" class="space-y-6">
-                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
                     <div class="card p-8 rounded-3xl">
                         <div><p class="text-slate-500 text-[10px] font-black uppercase">Watching</p></div>
                         <h3 id="watching-count" class="text-4xl font-black mt-4">--</h3>
@@ -79,6 +79,10 @@
                     <div class="card p-8 rounded-3xl">
                         <div><p class="text-slate-500 text-[10px] font-black uppercase">Queue</p></div>
                         <h3 id="pending-count" class="text-4xl font-black mt-4">0</h3>
+                    </div>
+                    <div class="card p-8 rounded-3xl cursor-pointer hover:border-red-500/50" onclick="switchTab('history'); document.getElementById('history-filter').value = 'Corrupt'; loadHistory('');">
+                        <div><p class="text-slate-500 text-[10px] font-black uppercase">Corrupt Files</p></div>
+                        <h3 id="corrupt-count" class="text-4xl font-black mt-4 text-red-400">0</h3>
                     </div>
                 </div>
                 <div id="storage-container" class="grid grid-cols-1 gap-4"></div>
@@ -107,6 +111,7 @@
                                 <option value="Health Check">Health</option>
                                 <option value="Scan">Scans</option>
                                 <option value="Error">Errors</option>
+                                <option value="Corrupt">Corrupt</option>
                             </select>
                             <input type="text" id="history-search" placeholder="Search..." class="px-4 py-2 text-xs w-48">
                         </div>
@@ -202,6 +207,8 @@
                                     <div class="flex items-center gap-2"><input type="checkbox" id="s-startup" class="w-4 h-4"><label class="text-xs">Run on Startup</label></div>
                                     <div class="flex items-center gap-2"><input type="checkbox" id="s-inc" class="w-4 h-4"><label class="text-xs">Incremental Scan</label></div>
                                     <div class="flex items-center gap-2"><input type="checkbox" id="s-symlink" class="w-4 h-4"><label class="text-xs">Check Symlinks</label></div>
+                                    <div class="flex items-center gap-2"><input type="checkbox" id="s-integrity" class="w-4 h-4"><label class="text-xs">Enable Integrity Check (0-byte)</label></div>
+                                    <div class="flex items-center gap-2"><input type="checkbox" id="s-ffprobe" class="w-4 h-4"><label class="text-xs">Enable ffprobe check</label></div>
                                 </div>
                                 <div class="grid grid-cols-2 gap-4 mt-3 pt-3 border-t border-slate-800">
                                     <div class="flex items-center gap-2"><input type="checkbox" id="s-abort-mass-delete" class="w-4 h-4"><label class="text-xs">Abort on Mass Deletion</label></div>
@@ -434,6 +441,8 @@
                 run_on_startup: document.getElementById('s-startup').checked,
                 incremental_scan: document.getElementById('s-inc').checked,
                 symlink_check: document.getElementById('s-symlink').checked,
+                integrity_check: document.getElementById('s-integrity').checked,
+                ffprobe_check: document.getElementById('s-ffprobe').checked,
                 use_polling: document.getElementById('s-poll').checked,
                 watch_mode: document.getElementById('s-watch').checked,
                 start_time: document.getElementById('s-start-time').value,
@@ -606,6 +615,8 @@
                 if(currentTab === 'dashboard') { 
                     document.getElementById('watching-count').innerText = data.watching_count; 
                     document.getElementById('pending-count').innerText = data.pending.length; 
+                    const corruptEl = document.getElementById('corrupt-count');
+                    if(corruptEl) corruptEl.innerText = data.corrupt_count || 0; 
                     document.getElementById('queue-list').innerHTML = data.pending.map(p => `<div class="card p-3 rounded-xl flex justify-between text-xs font-bold"><span>${p.path}</span><span>${p.remaining}s</span></div>`).join(''); 
                     document.getElementById('watching-list').innerHTML = (data.watching_paths || []).map(p => `<div class="card p-3 rounded-xl text-[10px] font-bold truncate">${p}</div>`).join(''); 
                     document.getElementById('libraries-list').innerHTML = data.libraries.map(l => `<div class="card p-3 rounded-xl flex justify-between items-center"><div class="flex flex-col"><span class="text-xs font-bold text-white">${l.title}</span><span class="text-[9px] font-black uppercase text-slate-500">${l.type}</span></div><div class="flex items-center gap-3"><span class="text-xs font-mono text-blue-400 font-bold">${l.count.toLocaleString()}</span><button onclick="scanLibrary(this, '${l.id}', '${l.title.replace(/'/g, "\'")}')" class="bg-blue-500/10 text-blue-400 w-6 h-6 rounded flex items-center justify-center hover:bg-blue-500 hover:text-white transition-all"><i class="fas fa-sync-alt text-[10px]"></i></button></div></div>`).join(''); 
@@ -628,6 +639,8 @@
                     document.getElementById('s-startup').checked = c.run_on_startup; 
                     document.getElementById('s-inc').checked = c.incremental_scan; 
                     document.getElementById('s-symlink').checked = c.symlink_check; 
+                    document.getElementById('s-integrity').checked = c.integrity_check; 
+                    document.getElementById('s-ffprobe').checked = c.ffprobe_check; 
                     document.getElementById('s-poll').checked = c.use_polling; 
                     document.getElementById('s-watch').checked = c.watch_mode;
                     document.getElementById('s-start-time').value = c.start_time || ""; 

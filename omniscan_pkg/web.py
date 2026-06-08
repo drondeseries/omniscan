@@ -169,6 +169,7 @@ class SettingsUpdate(BaseModel):
     start_time: Optional[str] = None; incremental_scan: bool; scan_since_days: int; symlink_check: bool
     deletion_threshold: int; abort_on_mass_deletion: bool
     notifications_enabled: bool; discord_webhook_url: str; ignore_patterns: str; log_level: str; path_rewrites: str
+    integrity_check: bool; ffprobe_check: bool
 
 def mask_s(v): return (v[:4] + "****" + v[-4:]) if v and len(v) >= 8 else "********"
 def unmask_v(n, r): return r if n == mask_s(r) else n
@@ -210,9 +211,12 @@ async def get_stats(u: str = Depends(get_current_user)):
     cfg = scanner_instance.config
     storage = await asyncio.get_event_loop().run_in_executor(None, get_storage_info, cfg.get('SCAN_PATHS', []))
 
+    corrupt_count = scanner_instance.history.get_corrupt_count()
+
     return {
         "libraries": lib_stats, "pending": p, "watching_count": len(cfg.get('SCAN_PATHS', [])), "watching_paths": cfg.get('SCAN_PATHS', []),
         "storage": storage,
+        "corrupt_count": corrupt_count,
         "is_scanning": scanner_instance.is_scanning, "uptime": datetime.now().strftime("%H:%M:%S"),
         "config": {
             "server_type": cfg.get('SERVER_TYPE'), "server_url": mask_s(cfg.get('SERVER_URL', '')), "api_key": mask_s(cfg.get('API_KEY', '')),
@@ -223,7 +227,9 @@ async def get_stats(u: str = Depends(get_current_user)):
             "symlink_check": cfg.get('SYMLINK_CHECK'), "deletion_threshold": cfg.get('DELETION_THRESHOLD'), "abort_on_mass_deletion": cfg.get('ABORT_ON_MASS_DELETION'),
             "notifications_enabled": cfg.get('NOTIFICATIONS_ENABLED'),
             "discord_webhook_url": mask_s(cfg.get('DISCORD_WEBHOOK_URL')), "ignore_patterns": "\n".join(cfg.get('IGNORE_PATTERNS', [])), "log_level": cfg.get('LOG_LEVEL'),
-            "path_rewrites": "\n".join([f"{src}:{dst}" for src, dst in cfg.get('PATH_REWRITES', [])])
+            "path_rewrites": "\n".join([f"{src}:{dst}" for src, dst in cfg.get('PATH_REWRITES', [])]),
+            "integrity_check": cfg.get('INTEGRITY_CHECK'),
+            "ffprobe_check": cfg.get('FFPROBE_CHECK')
         }
     }
 
@@ -280,6 +286,8 @@ async def update_settings(s: SettingsUpdate, u: str = Depends(get_current_user))
     c['DELETION_THRESHOLD'] = s.deletion_threshold; c['ABORT_ON_MASS_DELETION'] = s.abort_on_mass_deletion
     c['NOTIFICATIONS_ENABLED'] = s.notifications_enabled; c['DISCORD_WEBHOOK_URL'] = unmask_v(s.discord_webhook_url, c.get('DISCORD_WEBHOOK_URL', ''))
     c['IGNORE_PATTERNS'] = [p.strip() for p in s.ignore_patterns.replace(',', '\n').split('\n') if p.strip()]; c['LOG_LEVEL'] = s.log_level
+    c['INTEGRITY_CHECK'] = s.integrity_check
+    c['FFPROBE_CHECK'] = s.ffprobe_check
     
     c['PATH_REWRITES'] = []
     for line in s.path_rewrites.replace(',', '\n').split('\n'):
@@ -300,6 +308,8 @@ async def update_settings(s: SettingsUpdate, u: str = Depends(get_current_user))
         cfg.set('behaviour', 'use_polling', str(c['USE_POLLING']).lower()); cfg.set('behaviour', 'watch', str(c['WATCH_MODE']).lower()); cfg.set('behaviour', 'run_interval', str(c['RUN_INTERVAL'])); cfg.set('behaviour', 'run_on_startup', str(c['RUN_ON_STARTUP']).lower())
         cfg.set('behaviour', 'start_time', c['START_TIME'] if c['START_TIME'] else ""); cfg.set('behaviour', 'incremental_scan', str(c['INCREMENTAL_SCAN']).lower()); cfg.set('behaviour', 'scan_since_days', str(c['SCAN_SINCE_DAYS']))
         cfg.set('behaviour', 'symlink_check', str(c['SYMLINK_CHECK']).lower())
+        cfg.set('behaviour', 'integrity_check', str(c['INTEGRITY_CHECK']).lower())
+        cfg.set('behaviour', 'ffprobe_check', str(c['FFPROBE_CHECK']).lower())
         cfg.set('behaviour', 'deletion_threshold', str(c['DELETION_THRESHOLD'])); cfg.set('behaviour', 'abort_on_mass_deletion', str(c['ABORT_ON_MASS_DELETION']).lower())
         cfg.set('notifications', 'enabled', str(c['NOTIFICATIONS_ENABLED']).lower()); cfg.set('notifications', 'discord_webhook_url', str(c['DISCORD_WEBHOOK_URL']))
         cfg.set('ignore', 'patterns', ",".join(c['IGNORE_PATTERNS'])); cfg.set('logs', 'loglevel', str(c['LOG_LEVEL']))

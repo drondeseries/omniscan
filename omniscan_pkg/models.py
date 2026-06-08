@@ -125,6 +125,18 @@ class StuckFileTracker:
                 logger.error(f"DB Error fetching stuck files: {e}")
                 return []
 
+    def get_corrupt_count(self):
+        """Return the total number of corrupt files logged."""
+        with self.lock:
+            try:
+                with closing(sqlite3.connect(self.db_file)) as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT COUNT(*) FROM events WHERE event_type = 'Corrupt'")
+                    return cursor.fetchone()[0]
+            except Exception as e:
+                logger.error(f"DB Error fetching corrupt count: {e}")
+                return 0
+
     def clear_all_stuck(self):
         """Clear all entries from the stuck files database."""
         with self.lock:
@@ -143,6 +155,7 @@ class RunStats:
         self.start_time = datetime.now()
         self.missing_items = defaultdict(list)
         self.stuck_items = []
+        self.corrupt_items = []
         self.errors = []
         self.warnings = []
         self.total_scanned = 0
@@ -158,6 +171,10 @@ class RunStats:
     def add_stuck_item(self, file_path):
         with self.lock:
             self.stuck_items.append(file_path)
+
+    def add_corrupt_item(self, file_path, reason):
+        with self.lock:
+            self.corrupt_items.append((file_path, reason))
 
     def add_error(self, error):
         with self.lock:
@@ -220,6 +237,15 @@ class RunStats:
                 embed.add_field(
                     name=f"⛔ Stuck Files ({len(self.stuck_items)})",
                     value=format_file_list(self.stuck_items, prefix="! ", code_block=True),
+                    inline=False
+                )
+
+            # Add corrupt items summary
+            if self.corrupt_items:
+                corrupt_list = [f"{path} ({reason})" for path, reason in self.corrupt_items]
+                embed.add_field(
+                    name=f"❌ Corrupt Files ({len(self.corrupt_items)})",
+                    value=format_file_list(corrupt_list, prefix="x ", code_block=True),
                     inline=False
                 )
 

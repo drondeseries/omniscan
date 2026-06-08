@@ -64,6 +64,8 @@ def load_config(config_path='config.ini'):
     cfg['SCAN_DELAY'] = get_config_val(config, 'SCAN_DELAY', 'behaviour', 'scan_delay', 0.0, float)
     cfg['DELETION_THRESHOLD'] = get_config_val(config, 'DELETION_THRESHOLD', 'behaviour', 'deletion_threshold', 50, int)
     cfg['ABORT_ON_MASS_DELETION'] = get_config_val(config, 'ABORT_ON_MASS_DELETION', 'behaviour', 'abort_on_mass_deletion', 'true', lambda x: str(x).lower() == 'true')
+    cfg['INTEGRITY_CHECK'] = get_config_val(config, 'INTEGRITY_CHECK', 'behaviour', 'integrity_check', 'false', lambda x: str(x).lower() == 'true')
+    cfg['FFPROBE_CHECK'] = get_config_val(config, 'FFPROBE_CHECK', 'behaviour', 'ffprobe_check', 'false', lambda x: str(x).lower() == 'true')
 
     # Web Security
     cfg['WEB_USERNAME'] = get_config_val(config, 'WEB_USERNAME', 'web', 'username', 'admin')
