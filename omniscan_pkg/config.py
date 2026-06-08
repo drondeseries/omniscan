@@ -92,8 +92,8 @@ def load_config(config_path='config.ini'):
     ignore_patterns_raw = get_config_val(config, 'IGNORE_PATTERNS', 'ignore', 'patterns', '')
     cfg['IGNORE_PATTERNS'] = [p.strip() for p in ignore_patterns_raw.replace('\n', ',').split(',') if p.strip()]
     
-    # SCAN_EXTENSIONS: all file types that can trigger a Plex folder scan.
-    # Subtitles are included so Plex re-scans when a new .srt is added.
+    # MEDIA_EXTENSIONS: all file types that trigger a Plex folder scan.
+    # Subtitles are included so Plex re-scans when a new .srt appears.
     cfg['MEDIA_EXTENSIONS'] = {
         # Video
         '.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm',
@@ -101,21 +101,38 @@ def load_config(config_path='config.ini'):
         '.m2v', '.m2ts', '.ts', '.vob', '.iso', '.strm',
         # Audio
         '.mp3', '.flac', '.m4a', '.wav', '.ogg', '.opus', '.wma',
-        # Subtitles (Plex needs a scan to see new sidecar files)
+        # Subtitles (trigger folder scan only, not library check)
         '.srt', '.sub', '.ass', '.vtt'
     }
 
-    # LIBRARY_EXTENSIONS: file types that Plex/Jellyfin actually indexes as
-    # individual library items. Subtitle sidecar files are NOT indexed by
-    # Plex as separate entries — checking them against is_in_library() would
-    # cause every subtitle file to appear "missing" and accumulate as stuck.
-    cfg['LIBRARY_EXTENSIONS'] = {
+    # Default LIBRARY_EXTENSIONS: file types that the media server actually
+    # indexes as individual library items. Only these are checked against
+    # is_in_library() to determine if a file is missing.
+    #
+    # Subtitle sidecars (.srt/.sub/.ass/.vtt) are intentionally excluded —
+    # Plex/Jellyfin never stores subtitle paths as library entries, so checking
+    # them would cause every subtitle to appear "missing" and pile up as stuck.
+    #
+    # Override via [scan] library_extensions in config.ini or the
+    # LIBRARY_EXTENSIONS env var (comma-separated list of extensions with dots):
+    #   e.g. library_extensions = .mkv,.mp4,.mp3,.flac,.epub,.mobi
+    _DEFAULT_LIBRARY_EXTENSIONS = (
         # Video
-        '.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm',
-        '.m4v', '.m4p', '.m4b', '.m4r', '.3gp', '.mpg', '.mpeg',
-        '.m2v', '.m2ts', '.ts', '.vob', '.iso', '.strm',
+        '.mp4,.mkv,.avi,.mov,.wmv,.flv,.webm'
+        ',.m4v,.m4p,.m4b,.m4r,.3gp,.mpg,.mpeg'
+        ',.m2v,.m2ts,.ts,.vob,.iso,.strm'
         # Audio
-        '.mp3', '.flac', '.m4a', '.wav', '.ogg', '.opus', '.wma',
+        ',.mp3,.flac,.m4a,.wav,.ogg,.opus,.wma'
+    )
+    library_ext_raw = get_config_val(
+        config, 'LIBRARY_EXTENSIONS', 'scan', 'library_extensions',
+        _DEFAULT_LIBRARY_EXTENSIONS
+    )
+    cfg['LIBRARY_EXTENSIONS'] = {
+        e.strip().lower() if e.strip().startswith('.') else '.' + e.strip().lower()
+        for e in library_ext_raw.replace('\n', ',').split(',')
+        if e.strip()
     }
 
     return cfg
+
