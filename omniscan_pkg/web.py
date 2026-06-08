@@ -486,13 +486,41 @@ async def webhook_trigger(request: Request):
         if 'series' in data and 'path' in data['series']: raw_paths.add(data['series']['path'])
         if 'episodeFile' in data and 'path' in data['episodeFile']: raw_paths.add(data['episodeFile']['path'])
         
+        # 3. Lidarr (Music)
+        if 'artist' in data and 'path' in data['artist']: raw_paths.add(data['artist']['path'])
+        if 'trackFile' in data and 'path' in data['trackFile']: raw_paths.add(data['trackFile']['path'])
+        if 'trackFiles' in data and isinstance(data['trackFiles'], list):
+            for tf in data['trackFiles']:
+                if isinstance(tf, dict) and 'path' in tf:
+                    raw_paths.add(tf['path'])
+        
+        # 4. Readarr (Books)
+        if 'author' in data and 'path' in data['author']: raw_paths.add(data['author']['path'])
+        if 'bookFile' in data and 'path' in data['bookFile']: raw_paths.add(data['bookFile']['path'])
+        
         # Rename (source/dest)
         if 'sourcePath' in data: raw_paths.add(data['sourcePath'])
         if 'destPath' in data: raw_paths.add(data['destPath'])
 
+        # Apply path rewrites (Autopulse feature)
+        rewrites = scanner_instance.config.get('PATH_REWRITES', [])
+        rewritten_paths = set()
+        for p in raw_paths:
+            if not p: continue
+            rewrote = False
+            for src, dst in rewrites:
+                if p.startswith(src):
+                    new_p = os.path.normpath(p.replace(src, dst, 1))
+                    logger.info(f"Webhook path rewrote: {p} -> {new_p}")
+                    rewritten_paths.add(new_p)
+                    rewrote = True
+                    break
+            if not rewrote:
+                rewritten_paths.add(os.path.normpath(p))
+
         # De-duplicate: If we have /Show/Season/Ep and /Show, keep only /Show/Season/Ep
         # This prevents full series scans when a single episode is updated.
-        sorted_paths = sorted([p for p in raw_paths if p], key=len, reverse=True)
+        sorted_paths = sorted([p for p in rewritten_paths if p], key=len, reverse=True)
         for p in sorted_paths:
             is_redundant = False
             for existing in paths_to_scan:

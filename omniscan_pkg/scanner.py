@@ -258,11 +258,11 @@ class PlexScanner:
             while True:
                 items = []
                 if section.type == 'show':
-                    items = section.search(libtype='episode', start=start, size=batch_size)
+                    items = section.search(libtype='episode', container_start=start, maxresults=batch_size)
                 elif section.type == 'artist':
-                    items = section.search(libtype='track', start=start, size=batch_size)
+                    items = section.search(libtype='track', container_start=start, maxresults=batch_size)
                 else:
-                    items = section.all(start=start, size=batch_size)
+                    items = section.all(container_start=start, maxresults=batch_size)
 
                 if not items:
                     break
@@ -522,14 +522,24 @@ class PlexScanner:
             return
 
         with self.pending_scans_lock:
-            # OPTIMIZATION: Check if we already have a more specific scan pending (a child of this folder)
-            # This prevents broad scans (like Show root) from overriding specific ones (like Season)
-            # during the same debounce window.
-            for (pid, ppath) in self.pending_scans:
-                # Use a separator check to ensure it's a subpath and not a partial string match
-                if pid == library_id and (ppath.startswith(folder_path + os.sep) or ppath == folder_path):
-                    logger.debug(f"⏳ Skipping broad scan for {folder_path} as specific child {ppath} is already pending")
-                    return
+            # Check for parent/child redundancies
+            keys_to_remove = []
+            for (pid, ppath) in list(self.pending_scans.keys()):
+                if pid == library_id:
+                    # Case 1: A parent/ancestor of the new folder is already pending scan.
+                    # The new scan is redundant, so we skip it.
+                    if folder_path.startswith(ppath + os.sep) or ppath == folder_path:
+                        logger.debug(f"⏳ Skipping specific scan for {folder_path} as broad parent {ppath} is already pending")
+                        return
+
+                    # Case 2: The new folder is a parent/ancestor of an already pending scan.
+                    # The pending scan is redundant, so we remove it.
+                    if ppath.startswith(folder_path + os.sep):
+                        logger.debug(f"⏳ Removing specific pending scan {ppath} in favor of broad parent scan {folder_path}")
+                        keys_to_remove.append((pid, ppath))
+
+            for k in keys_to_remove:
+                del self.pending_scans[k]
 
             is_new = (library_id, folder_path) not in self.pending_scans
             # Update the last event time for this (library, folder)
@@ -926,7 +936,9 @@ class PlexScanner:
         # If the root of the scan is missing, the mount is likely down.
         scan_root = None
         for path in self.config['SCAN_PATHS']:
-             if file_path.startswith(path):
+             norm_p = os.path.normpath(path)
+             norm_f = os.path.normpath(file_path)
+             if norm_f == norm_p or norm_f.startswith(norm_p + os.sep):
                  scan_root = path
                  break
         

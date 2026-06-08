@@ -75,6 +75,17 @@ def load_config(config_path='config.ini'):
     if cfg['SCAN_PATHS']:
         cfg['SCAN_PATHS'].sort()
 
+    # Parse Path Rewrites (from Autopulse features)
+    rewrites_raw = get_config_val(config, 'PATH_REWRITES', 'rewrite', 'mappings', '')
+    cfg['PATH_REWRITES'] = []
+    for line in rewrites_raw.replace(',', '\n').split('\n'):
+        line = line.strip()
+        if not line:
+            continue
+        if ':' in line:
+            parts = line.split(':', 1)
+            cfg['PATH_REWRITES'].append((parts[0].strip(), parts[1].strip()))
+
     # Parse Ignore Patterns
     ignore_patterns_raw = get_config_val(config, 'IGNORE_PATTERNS', 'ignore', 'patterns', '')
     cfg['IGNORE_PATTERNS'] = [p.strip() for p in ignore_patterns_raw.replace('\n', ',').split(',') if p.strip()]
