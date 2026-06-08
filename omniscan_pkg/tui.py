@@ -37,7 +37,7 @@ def authenticate():
         # Check if setup is completed first
         status_res = session.get(f"{api_url}/", timeout=3)
         if "/setup" in status_res.url:
-            return False, "System setup not completed. Please configure via Web UI first."
+            return False, "SETUP_REQUIRED"
 
         login_url = f"{api_url}/login"
         res = session.post(login_url, data={"username": username, "password": password}, timeout=3)
@@ -244,6 +244,68 @@ def draw_tui(stdscr):
             
         time.sleep(0.1)
 
+import getpass
+
+def run_setup_wizard():
+    print("\n==================================================")
+    print("         OMNISCAN TERMINAL SETUP WIZARD")
+    print("==================================================")
+    print("Welcome to Omniscan! Please complete the initial configuration.\n")
+
+    user = input("Web Admin Username [admin]: ").strip() or "admin"
+    
+    pwd = ""
+    while not pwd:
+        pwd = getpass.getpass("Web Admin Password: ").strip()
+        if not pwd:
+            print("Password cannot be empty!")
+
+    server_type = ""
+    while server_type not in ["plex", "jellyfin", "emby"]:
+        server_type = input("Media Server Type (plex/jellyfin/emby) [plex]: ").strip().lower() or "plex"
+
+    plex_server = ""
+    plex_token = ""
+    server_url = ""
+    api_key = ""
+
+    if server_type == "plex":
+        plex_server = input("Plex Server URL [http://localhost:32400]: ").strip() or "http://localhost:32400"
+        plex_token = input("Plex Token: ").strip()
+    else:
+        server_url = input(f"{server_type.capitalize()} Server URL [http://localhost:8096]: ").strip() or "http://localhost:8096"
+        api_key = input(f"{server_type.capitalize()} API Key: ").strip()
+
+    scan_directories = input("Media Scan Paths (comma-separated, e.g. /media/Movies, /media/TV Shows): ").strip()
+
+    payload = {
+        "username": user,
+        "password": pwd,
+        "server_type": server_type,
+        "plex_server": plex_server,
+        "plex_token": plex_token,
+        "server_url": server_url,
+        "api_key": api_key,
+        "scan_directories": scan_directories
+    }
+
+    print("\nSaving configuration...")
+    try:
+        res = session.post(f"{api_url}/api/setup", json=payload, timeout=5)
+        if res.status_code == 200:
+            print("Configuration saved successfully!")
+            # Update global credentials for subsequent authentication
+            global username, password
+            username = user
+            password = pwd
+        else:
+            err = res.json().get("error", "Unknown error occurred")
+            print(f"Configuration Failed: {err}")
+            sys.exit(1)
+    except Exception as e:
+        print(f"Failed to communicate with setup endpoint: {e}")
+        sys.exit(1)
+
 def main():
     global api_url, username, password
     parser = argparse.ArgumentParser(description="Omniscan Command-Line TUI Console")
@@ -265,8 +327,15 @@ def main():
     print("Connecting to Omniscan API...")
     success, msg = authenticate()
     if not success:
-        print(f"Connection Failed: {msg}")
-        sys.exit(1)
+        if msg == "SETUP_REQUIRED":
+            run_setup_wizard()
+            success, msg = authenticate()
+            if not success:
+                print(f"Connection Failed after setup: {msg}")
+                sys.exit(1)
+        else:
+            print(f"Connection Failed: {msg}")
+            sys.exit(1)
 
     print("Success! Initializing interface...")
     
