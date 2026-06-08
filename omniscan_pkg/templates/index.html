@@ -867,7 +867,7 @@
             window.saveSettings(this.querySelector('button[type="submit"]'));
         });
 
-        let ws; let pollingInterval; const strip = (s) => s.replace(/[ ›][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g, '');
+        let ws; let pollingInterval; const strip = (s) => s.replace(/[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g, '');
         function connectLogs() { 
             if(pollingInterval) return; 
             if(ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return; 

@@ -6,6 +6,9 @@ import sys
 import threading
 import os
 import configparser
+import re
+
+ansi_escape = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]')
 
 # Global session for API requests
 session = requests.Session()
@@ -280,6 +283,7 @@ def draw_tui(stdscr):
                 clean_line = log_line
                 if " | " in log_line:
                     clean_line = log_line.split(" | ", 1)[1]
+                clean_line = ansi_escape.sub('', clean_line)
                 
                 color = curses.color_pair(5)
                 if "ERROR" in log_line:
