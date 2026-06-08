@@ -1144,18 +1144,6 @@ class PlexScanner:
                 for future in futures:
                     future.result()
 
-            # Mass Deletion Safety Check
-            if self.config.get('ABORT_ON_MASS_DELETION') and stats.total_missing > self.config.get('DELETION_THRESHOLD', 50):
-                msg = f"🛑 MASS DELETION DETECTED: {stats.total_missing} items missing. Aborting scan to protect library metadata."
-                logger.error(msg)
-                self.send_single_notification(
-                    "🚨 Scan Aborted (Safety Trigger)",
-                    f"Mass deletion threshold exceeded (**{stats.total_missing}** items missing).\n"
-                    f"Threshold: **{self.config.get('DELETION_THRESHOLD')}** items.\n\n"
-                    "Please check your mounts/storage. No library updates were triggered.",
-                    Color.red()
-                )
-                return
 
             if stats.total_missing > 0:
                 stats.send_discord_pending(len(folders_to_scan))
