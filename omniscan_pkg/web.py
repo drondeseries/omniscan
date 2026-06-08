@@ -168,7 +168,7 @@ class SettingsUpdate(BaseModel):
     scan_workers: int; scan_debounce: int; scan_delay: float; use_polling: bool; watch_mode: bool; run_interval: int; run_on_startup: bool
     start_time: Optional[str] = None; incremental_scan: bool; scan_since_days: int; symlink_check: bool
     deletion_threshold: int; abort_on_mass_deletion: bool
-    notifications_enabled: bool; discord_webhook_url: str; ignore_patterns: str; log_level: str
+    notifications_enabled: bool; discord_webhook_url: str; ignore_patterns: str; log_level: str; path_rewrites: str
 
 def mask_s(v): return (v[:4] + "****" + v[-4:]) if v and len(v) >= 8 else "********"
 def unmask_v(n, r): return r if n == mask_s(r) else n
@@ -222,7 +222,8 @@ async def get_stats(u: str = Depends(get_current_user)):
             "start_time": cfg.get('START_TIME'), "incremental_scan": cfg.get('INCREMENTAL_SCAN'), "scan_since_days": cfg.get('SCAN_SINCE_DAYS'),
             "symlink_check": cfg.get('SYMLINK_CHECK'), "deletion_threshold": cfg.get('DELETION_THRESHOLD'), "abort_on_mass_deletion": cfg.get('ABORT_ON_MASS_DELETION'),
             "notifications_enabled": cfg.get('NOTIFICATIONS_ENABLED'),
-            "discord_webhook_url": mask_s(cfg.get('DISCORD_WEBHOOK_URL')), "ignore_patterns": "\n".join(cfg.get('IGNORE_PATTERNS', [])), "log_level": cfg.get('LOG_LEVEL')
+            "discord_webhook_url": mask_s(cfg.get('DISCORD_WEBHOOK_URL')), "ignore_patterns": "\n".join(cfg.get('IGNORE_PATTERNS', [])), "log_level": cfg.get('LOG_LEVEL'),
+            "path_rewrites": "\n".join([f"{src}:{dst}" for src, dst in cfg.get('PATH_REWRITES', [])])
         }
     }
 
@@ -279,9 +280,18 @@ async def update_settings(s: SettingsUpdate, u: str = Depends(get_current_user))
     c['DELETION_THRESHOLD'] = s.deletion_threshold; c['ABORT_ON_MASS_DELETION'] = s.abort_on_mass_deletion
     c['NOTIFICATIONS_ENABLED'] = s.notifications_enabled; c['DISCORD_WEBHOOK_URL'] = unmask_v(s.discord_webhook_url, c.get('DISCORD_WEBHOOK_URL', ''))
     c['IGNORE_PATTERNS'] = [p.strip() for p in s.ignore_patterns.replace(',', '\n').split('\n') if p.strip()]; c['LOG_LEVEL'] = s.log_level
+    
+    c['PATH_REWRITES'] = []
+    for line in s.path_rewrites.replace(',', '\n').split('\n'):
+        line = line.strip()
+        if not line: continue
+        if ':' in line:
+            parts = line.split(':', 1)
+            c['PATH_REWRITES'].append((parts[0].strip(), parts[1].strip()))
+
     try:
         cfg = configparser.ConfigParser(); cfg.read('config.ini')
-        for sec in ['server', 'plex', 'behaviour', 'notifications', 'scan', 'ignore', 'logs']:
+        for sec in ['server', 'plex', 'behaviour', 'notifications', 'scan', 'ignore', 'logs', 'rewrite']:
             if not cfg.has_section(sec): cfg.add_section(sec)
         cfg.set('server', 'type', str(c['SERVER_TYPE'])); cfg.set('server', 'url', str(c['SERVER_URL'])); cfg.set('server', 'api_key', str(c['API_KEY']))
         cfg.set('plex', 'server', str(c['PLEX_URL'])); cfg.set('plex', 'token', str(c['TOKEN']))
@@ -293,6 +303,7 @@ async def update_settings(s: SettingsUpdate, u: str = Depends(get_current_user))
         cfg.set('behaviour', 'deletion_threshold', str(c['DELETION_THRESHOLD'])); cfg.set('behaviour', 'abort_on_mass_deletion', str(c['ABORT_ON_MASS_DELETION']).lower())
         cfg.set('notifications', 'enabled', str(c['NOTIFICATIONS_ENABLED']).lower()); cfg.set('notifications', 'discord_webhook_url', str(c['DISCORD_WEBHOOK_URL']))
         cfg.set('ignore', 'patterns', ",".join(c['IGNORE_PATTERNS'])); cfg.set('logs', 'loglevel', str(c['LOG_LEVEL']))
+        cfg.set('rewrite', 'mappings', ",".join([f"{src}:{dst}" for src, dst in c['PATH_REWRITES']]))
         with open('config.ini', 'w') as f: cfg.write(f)
         if c['SERVER_TYPE'] == 'plex': scanner_instance.connect_to_plex(retry=False); scanner_instance.get_library_ids()
         return {"status": "success"}

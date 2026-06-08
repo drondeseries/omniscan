@@ -203,6 +203,10 @@
                                     <div class="flex items-center gap-2"><input type="checkbox" id="s-inc" class="w-4 h-4"><label class="text-xs">Incremental Scan</label></div>
                                     <div class="flex items-center gap-2"><input type="checkbox" id="s-symlink" class="w-4 h-4"><label class="text-xs">Check Symlinks</label></div>
                                 </div>
+                                <div class="grid grid-cols-2 gap-4 mt-3 pt-3 border-t border-slate-800">
+                                    <div class="flex items-center gap-2"><input type="checkbox" id="s-abort-mass-delete" class="w-4 h-4"><label class="text-xs">Abort on Mass Deletion</label></div>
+                                    <div><label class="block text-[10px] font-black uppercase mb-1">Deletion Threshold</label><input type="number" id="s-delete-threshold" class="w-full p-3 text-xs"></div>
+                                </div>
                             </div>
                         </div>
                         <div class="card p-6 rounded-2xl space-y-4">
@@ -222,6 +226,9 @@
                         </div>
                         <div class="card p-6 rounded-2xl space-y-4">
                             <div><h3 class="font-bold mb-4">Ignore Patterns</h3><textarea id="s-ignore" rows="3" class="w-full p-3" placeholder="*.tmp, .DS_Store"></textarea></div>
+                        </div>
+                        <div class="card p-6 rounded-2xl space-y-4">
+                            <div><h3 class="font-bold mb-4">Path Rewrites (mappings)</h3><textarea id="s-rewrites" rows="3" class="w-full p-3" placeholder="/downloads/movies:/mnt/usenet-rclone/movies&#10;/downloads/tv:/mnt/usenet-rclone/tv"></textarea></div>
                         </div>
                     </div>
                     <div class="sticky bottom-10 flex justify-center"><button type="submit" class="bg-blue-600 px-12 py-4 rounded-full font-bold text-white shadow-xl">Sync Settings</button></div>
@@ -432,7 +439,10 @@
                 start_time: document.getElementById('s-start-time').value,
                 scan_delay: parseFloat(document.getElementById('s-delay').value),
                 log_level: document.getElementById('s-loglevel').value,
-                ignore_patterns: document.getElementById('s-ignore').value
+                ignore_patterns: document.getElementById('s-ignore').value,
+                path_rewrites: document.getElementById('s-rewrites').value,
+                abort_on_mass_deletion: document.getElementById('s-abort-mass-delete').checked,
+                deletion_threshold: parseInt(document.getElementById('s-delete-threshold').value)
             }; 
         }
 
@@ -624,6 +634,9 @@
                     document.getElementById('s-delay').value = c.scan_delay; 
                     document.getElementById('s-loglevel').value = c.log_level; 
                     document.getElementById('s-ignore').value = c.ignore_patterns; 
+                    document.getElementById('s-rewrites').value = c.path_rewrites || ""; 
+                    document.getElementById('s-abort-mass-delete').checked = c.abort_on_mass_deletion;
+                    document.getElementById('s-delete-threshold').value = c.deletion_threshold;
                     initialConfigLoaded = true; window.currentConfig = c; 
                 } 
             } catch(e) {} 
