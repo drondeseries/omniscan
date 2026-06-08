@@ -250,7 +250,7 @@ def main():
     parser.add_argument('--url', type=str, help="API server URL (e.g. http://localhost:8085)")
     parser.add_argument('--username', type=str, help="API login username")
     parser.add_argument('--password', type=str, help="API login password")
-    args = parser.parse_args()
+    args, _ = parser.parse_known_args()
 
     load_local_config()
 
