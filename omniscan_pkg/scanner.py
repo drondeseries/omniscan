@@ -949,10 +949,12 @@ class PlexScanner:
                 should_scan = True
                 if tracker:
                     if tracker.increment_attempt(file_path):
-                        stats.add_stuck_item(file_path)
+                        if stats:
+                            stats.add_stuck_item(file_path)
                         should_scan = False
                     else:
-                        stats.add_missing_item(library_title, file_path)
+                        if stats:
+                            stats.add_missing_item(library_title, file_path)
                 
                 if should_scan:
                     # Enqueue for notification
