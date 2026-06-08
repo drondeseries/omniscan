@@ -92,7 +92,8 @@ def load_config(config_path='config.ini'):
     ignore_patterns_raw = get_config_val(config, 'IGNORE_PATTERNS', 'ignore', 'patterns', '')
     cfg['IGNORE_PATTERNS'] = [p.strip() for p in ignore_patterns_raw.replace('\n', ',').split(',') if p.strip()]
     
-    # Media extensions
+    # SCAN_EXTENSIONS: all file types that can trigger a Plex folder scan.
+    # Subtitles are included so Plex re-scans when a new .srt is added.
     cfg['MEDIA_EXTENSIONS'] = {
         # Video
         '.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm',
@@ -102,6 +103,19 @@ def load_config(config_path='config.ini'):
         '.mp3', '.flac', '.m4a', '.wav', '.ogg', '.opus', '.wma',
         # Subtitles (Plex needs a scan to see new sidecar files)
         '.srt', '.sub', '.ass', '.vtt'
+    }
+
+    # LIBRARY_EXTENSIONS: file types that Plex/Jellyfin actually indexes as
+    # individual library items. Subtitle sidecar files are NOT indexed by
+    # Plex as separate entries — checking them against is_in_library() would
+    # cause every subtitle file to appear "missing" and accumulate as stuck.
+    cfg['LIBRARY_EXTENSIONS'] = {
+        # Video
+        '.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm',
+        '.m4v', '.m4p', '.m4b', '.m4r', '.3gp', '.mpg', '.mpeg',
+        '.m2v', '.m2ts', '.ts', '.vob', '.iso', '.strm',
+        # Audio
+        '.mp3', '.flac', '.m4a', '.wav', '.ogg', '.opus', '.wma',
     }
 
     return cfg

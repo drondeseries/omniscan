@@ -918,6 +918,12 @@ class PlexScanner:
         if stats: stats.increment_scanned()
         SCANNED_FILES_TOTAL.inc()
 
+        # Only check library membership for video/audio files.
+        # Subtitle sidecar files (.srt/.sub/.ass/.vtt) are not indexed by
+        # Plex as individual items — skipping them prevents false stuck entries.
+        if file_ext not in self.config['LIBRARY_EXTENSIONS']:
+            return
+
         if not self.is_in_library(file_path):
             is_valid, reason = self.check_file_integrity(file_path)
             if not is_valid:
@@ -1082,6 +1088,11 @@ class PlexScanner:
                 stats.increment_scanned()
                 SCANNED_FILES_TOTAL.inc()
 
+                # Only check library membership for video/audio files.
+                # Subtitle sidecar files are not Plex library items.
+                if file_ext not in self.config['LIBRARY_EXTENSIONS']:
+                    continue
+
                 if not self.is_in_library(file_path):
                     is_valid, reason = self.check_file_integrity(file_path)
                     if not is_valid:
@@ -1176,7 +1187,12 @@ class PlexScanner:
                                     
                                     stats.increment_scanned()
                                     SCANNED_FILES_TOTAL.inc()
-                                    
+
+                                    # Only check library membership for video/audio files.
+                                    # Subtitle sidecar files are not Plex library items.
+                                    if file_ext not in self.config['LIBRARY_EXTENSIONS']:
+                                        continue
+
                                     if not self.is_in_library(file_path):
                                         is_valid, reason = self.check_file_integrity(file_path)
                                         if not is_valid:
