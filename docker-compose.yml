@@ -1,9 +1,8 @@
 services:
   omniscan:
-    build: .
     restart: unless-stopped 
     container_name: omniscan 
-    image: omniscan:latest
+    image: ghcr.io/drondeseries/omniscan:latest
     hostname: omniscan 
     ports:
       - 8085:8000

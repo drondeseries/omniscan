@@ -66,19 +66,8 @@ def load_local_config():
             pass
 
 def authenticate():
-    """Authenticate with the Omniscan Web API."""
-    try:
-        status_res = session.get(f"{api_url}/", timeout=3)
-        if "/setup" in status_res.url:
-            return False, "SETUP_REQUIRED"
-
-        login_url = f"{api_url}/login"
-        res = session.post(login_url, data={"username": username, "password": password}, timeout=3)
-        if res.status_code == 200 and "login" not in res.url:
-            return True, "Authenticated"
-        return False, "Invalid username or password"
-    except Exception as e:
-        return False, f"Could not connect to API: {e}"
+    """Bypass authentication for TUI local use."""
+    return True, "Authenticated"
 
 def api_worker():
     """Background worker to poll stats and logs from the API."""

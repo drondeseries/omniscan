@@ -49,6 +49,7 @@ def load_config(config_path='config.ini'):
     cfg['DISCORD_AVATAR_URL'] = "https://raw.githubusercontent.com/drondeseries/omniscan/master/assets/logo.png"
     cfg['DISCORD_WEBHOOK_NAME'] = "Omniscan"
     cfg['SYMLINK_CHECK'] = get_config_val(config, 'SYMLINK_CHECK', 'behaviour', 'symlink_check', 'false', lambda x: str(x).lower() == 'true')
+    cfg['EMPTY_TRASH'] = get_config_val(config, 'EMPTY_TRASH', 'behaviour', 'empty_trash', 'false', lambda x: str(x).lower() == 'true')
     cfg['NOTIFICATIONS_ENABLED'] = get_config_val(config, 'NOTIFICATIONS_ENABLED', 'notifications', 'enabled', 'true', lambda x: str(x).lower() == 'true')
     cfg['START_TIME'] = get_config_val(config, 'START_TIME', 'behaviour', 'start_time')
     cfg['RUN_ON_STARTUP'] = get_config_val(config, 'RUN_ON_STARTUP', 'behaviour', 'run_on_startup', 'true', lambda x: str(x).lower() == 'true')

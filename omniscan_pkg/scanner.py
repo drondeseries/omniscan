@@ -51,6 +51,7 @@ class PlexScanner:
         self.library_files = {} # Changed to dict for easier clearing
         self.library_counts = {} # Store last known counts when cache is invalidated
         self.library_missing_counts = {} # Store count of missing files per library
+        self.library_missing_files = {} # Store sets of actual missing file paths
         self.library_files_lock = threading.Lock()
         self.loading_libraries = set()
         self.loading_lock = threading.Lock()
@@ -160,24 +161,41 @@ class PlexScanner:
 
         if server_type == 'plex':
             if not self.plex: return {}
-            for section in self.plex.library.sections():
-                lib_type = section.type
-                lib_key = str(section.key)
-                lib_title = section.title
-                self.library_ids[lib_type] = lib_key
+            try:
+                url = f"{self.plex._baseurl}/library/sections"
+                headers = {
+                    "Accept": "application/json",
+                    "X-Plex-Token": self.plex._token
+                }
+                res = self.plex._session.get(url, headers=headers)
+                res.raise_for_status()
+                data = res.json()
                 
-                section_locations = []
-                for location in section.locations:
-                    self.library_paths[location] = lib_key
-                    section_locations.append(location)
-                    logger.debug(f"Found library '{lib_title}' (ID: {lib_key}) at path: {location}")
+                container = data.get('MediaContainer', {})
+                directories = container.get('Directory', [])
+                
+                for directory in directories:
+                    lib_type = directory.get('type')
+                    lib_key = str(directory.get('key'))
+                    lib_title = directory.get('title')
+                    self.library_ids[lib_type] = lib_key
                     
-                self.library_sections_cache.append({
-                    'id': lib_key,
-                    'title': lib_title,
-                    'type': lib_type,
-                    'locations': section_locations
-                })
+                    section_locations = []
+                    for loc in directory.get('Location', []):
+                        location = loc.get('path')
+                        if location:
+                            self.library_paths[location] = lib_key
+                            section_locations.append(location)
+                            logger.debug(f"Found library '{lib_title}' (ID: {lib_key}) at path: {location}")
+                            
+                    self.library_sections_cache.append({
+                        'id': lib_key,
+                        'title': lib_title,
+                        'type': lib_type,
+                        'locations': section_locations
+                    })
+            except Exception as e:
+                logger.error(f"Failed to fetch Plex libraries: {e}")
         elif server_type in ['jellyfin', 'emby']:
             self._get_jellyfin_libraries()
 
@@ -211,11 +229,11 @@ class PlexScanner:
 
     def get_library_id_for_path(self, file_path):
         """Get the library section ID and type for a given file path from cache."""
-        import pathlib
         best_match = None
-        best_match_length = 0
+        best_match_length = -1
         
-        path = pathlib.Path(os.path.normpath(file_path))
+        norm_file_path = os.path.normpath(file_path)
+        norm_file_path_sep = norm_file_path + os.sep
         
         for section in self.library_sections_cache:
             section_id = section['id']
@@ -223,13 +241,13 @@ class PlexScanner:
             section_type = section['type']
             
             for location_path in section['locations']:
-                loc = pathlib.Path(os.path.normpath(location_path))
+                norm_loc = os.path.normpath(location_path)
                 
-                # Check if path is the location itself or a child of it
-                if loc == path or loc in path.parents:
-                    if len(str(loc)) > best_match_length:
+                if norm_file_path == norm_loc or norm_file_path_sep.startswith(norm_loc + os.sep):
+                    loc_len = len(norm_loc)
+                    if loc_len > best_match_length:
                         best_match = (section_id, section_title, section_type)
-                        best_match_length = len(str(loc))
+                        best_match_length = loc_len
         
         if best_match:
             return best_match
@@ -253,37 +271,48 @@ class PlexScanner:
             logger.info(f"💾 Initializing cache for library {BOLD}{section.title}{RESET}...")
             cache_start = time.time()
             
-            batch_size = 5000
+            batch_size = 10000
             start = 0
             new_files = set()
             count = 0
             
+            endpoint = "/allLeaves" if section.type in ['show', 'artist'] else "/all"
+            
             while True:
-                items = []
-                if section.type == 'show':
-                    items = section.search(libtype='episode', container_start=start, maxresults=batch_size)
-                elif section.type == 'artist':
-                    items = section.search(libtype='track', container_start=start, maxresults=batch_size)
-                else:
-                    items = section.all(container_start=start, maxresults=batch_size)
-
+                url = f"{self.plex._baseurl}/library/sections/{library_id}{endpoint}"
+                params = {
+                    "X-Plex-Container-Start": start,
+                    "X-Plex-Container-Size": batch_size
+                }
+                headers = {
+                    "Accept": "application/json",
+                    "X-Plex-Token": self.plex._token
+                }
+                res = self.plex._session.get(url, params=params, headers=headers)
+                res.raise_for_status()
+                data = res.json()
+                
+                container = data.get('MediaContainer', {})
+                items = container.get('Metadata', [])
+                
                 if not items:
                     break
-
+                
                 for item in items:
-                    for media in item.media:
-                        for part in media.parts:
-                            if part.file:
-                                new_files.add(os.path.normpath(part.file))
+                    for media in item.get('Media', []):
+                        for part in media.get('Part', []):
+                            file_path = part.get('file')
+                            if file_path:
+                                new_files.add(os.path.normpath(file_path))
                                 count += 1
                 
                 batch_count = len(items)
                 start += batch_count
                 
-                # Free memory after each batch
+                del data
                 del items
                 gc.collect()
-
+                
                 if batch_count < batch_size:
                     break
 
@@ -334,7 +363,7 @@ class PlexScanner:
             if cached_files is None:
                 return 0
         
-        missing_count = 0
+        missing_files = set()
         lib_exts = self.config.get('LIBRARY_EXTENSIONS', set())
         
         for loc in section.get('locations', []):
@@ -347,9 +376,11 @@ class PlexScanner:
                         full_path = os.path.join(root, f)
                         norm_path = os.path.normpath(full_path)
                         if norm_path not in cached_files:
-                            missing_count += 1
+                            missing_files.add(norm_path)
                             
-        return missing_count
+        with self.library_files_lock:
+            self.library_missing_files[library_id] = missing_files
+        return len(missing_files)
 
     def is_in_library(self, file_path):
         """Check if a file exists in the media server."""
@@ -626,7 +657,7 @@ class PlexScanner:
                         # OR if enough time has passed.
                         
                         is_still_scoping = False
-                        for (pid, ppath) in self.pending_scans:
+                        for (pid, ppath, _) in self.pending_scans:
                             if notif_path == ppath or notif_path.startswith(ppath + os.sep):
                                 is_still_scoping = True
                                 break
@@ -805,10 +836,13 @@ class PlexScanner:
         # Log the metadata if it exists
         if metadata:
             logger.info(f"🔎 Scanning with metadata: {metadata}")
+            self.history.add_event("Scan Triggered", folder_path, server_type, metadata=metadata)
+        else:
+            self.history.add_event("Scan Triggered", folder_path, server_type)
         
         try:
             if server_type == 'plex':
-                self._trigger_plex_scan(library_id, folder_path)
+                self._trigger_plex_scan(library_id, folder_path, metadata=metadata)
             elif server_type in ['jellyfin', 'emby']:
                 self._trigger_jellyfin_emby_scan(library_id, folder_path)
         finally:
@@ -849,7 +883,7 @@ class PlexScanner:
         except Exception as e:
             logger.error(f"Failed to trigger {self.config['SERVER_TYPE']} scan: {e}")
 
-    def _trigger_plex_scan(self, library_id, folder_path):
+    def _trigger_plex_scan(self, library_id, folder_path, metadata=None):
         library_id = str(library_id)
         encoded_path = quote(folder_path)
         url = f"{self.config['PLEX_URL']}/library/sections/{library_id}/refresh?path={encoded_path}&X-Plex-Token={self.config['TOKEN']}"
@@ -872,13 +906,42 @@ class PlexScanner:
 
                 try:
                     is_scanning = False
-                    for activity in self.plex.activities:
-                        if activity.type == 'library.refresh.section' and str(activity.sectionID) == library_id:
-                            is_scanning = True
-                            break
+                    url = f"{self.plex._baseurl}/activities"
+                    headers = {
+                        "Accept": "application/json",
+                        "X-Plex-Token": self.plex._token
+                    }
+                    res = self.plex._session.get(url, headers=headers)
+                    if res.status_code == 200:
+                        data = res.json()
+                        container = data.get('MediaContainer', {})
+                        activities = container.get('Activity', [])
+                        for activity in activities:
+                            if activity.get('type') == 'library.refresh.section':
+                                context = activity.get('Context', {})
+                                if str(context.get('sectionID')) == library_id:
+                                    is_scanning = True
+                                    break
                     
                     if not is_scanning:
                         logger.info(f"✅ Plex scan finished for: {folder_path}")
+                        
+                        # Empty trash if deletion event and empty_trash behaviour is enabled
+                        is_deletion = metadata and metadata.get('event_type') == 'deleted'
+                        if is_deletion and self.config.get('EMPTY_TRASH'):
+                            logger.info(f"🧹 Emptying Plex trash for library: {library_id}")
+                            try:
+                                trash_url = f"{self.plex._baseurl}/library/sections/{library_id}/emptyTrash"
+                                trash_headers = {
+                                    "X-Plex-Token": self.plex._token
+                                }
+                                trash_res = self.plex._session.put(trash_url, headers=trash_headers)
+                                trash_res.raise_for_status()
+                                logger.info(f"✅ Plex trash emptied successfully for library: {library_id}")
+                                self.history.add_event("Trash Emptied", f"Library section {library_id}", "Plex")
+                            except Exception as trash_err:
+                                logger.error(f"Failed to empty Plex trash for library {library_id}: {trash_err}")
+                                
                         break
                     
                     time.sleep(5)
@@ -1079,7 +1142,7 @@ class PlexScanner:
                     self.pending_notifications[target_path]['library_title'] = library_title or "Media"
                 self.pending_notifications[target_path]['deleted'].append(file_path)
 
-            self.trigger_scan(library_id, target_path)
+            self.trigger_scan(library_id, target_path, metadata={'event_type': 'deleted'})
 
     def scan_directory(self, path, stats, tracker, folders_to_scan, folders_to_scan_lock):
         # Pre-calculate cutoff time for incremental scan
@@ -1187,6 +1250,10 @@ class PlexScanner:
             # Pre-cache libraries to prevent race conditions during parallel scanning
             for section in self.library_sections_cache:
                 self.cache_library_files(section['id'])
+                # Pre-calculate missing files count for UI statistics
+                missing_count = self.calculate_missing_files_for_library(section['id'])
+                with self.library_files_lock:
+                    self.library_missing_counts[str(section['id'])] = missing_count
 
             folders_to_scan = set()
             folders_to_scan_lock = threading.Lock()
@@ -1276,6 +1343,12 @@ class PlexScanner:
             tracker.save_history()
             stats.send_discord_summary()
             
+            # Recalculate missing files counts after scan completes
+            for section in self.library_sections_cache:
+                missing_count = self.calculate_missing_files_for_library(section['id'])
+                with self.library_files_lock:
+                    self.library_missing_counts[str(section['id'])] = missing_count
+            
         except Exception as e:
             logger.error(f"Error during scan: {e}")
         finally:
@@ -1284,6 +1357,8 @@ class PlexScanner:
             if not self.config.get('WATCH_MODE'):
                 with self.library_files_lock:
                     self.library_files.clear()
+                    self.library_missing_counts.clear()
+                    self.library_missing_files.clear()
             else:
                 logger.info("🧠 Retaining library cache for active watcher")
             

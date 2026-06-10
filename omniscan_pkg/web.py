@@ -1,24 +1,26 @@
+import os
+import time
+import logging
+import json
+import asyncio
+import sqlite3
+import pathlib
+import requests
+import secrets
+from collections import deque
+from datetime import datetime
+from typing import Optional, List
 from fastapi import FastAPI, Request, Depends, HTTPException, status, Form, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 from pydantic import BaseModel
-from typing import List, Optional
-import os
-import time
-import logging
-import configparser
-import requests
-import secrets
-import pathlib
-import asyncio
-import sqlite3
-import shutil
-from datetime import datetime
-from collections import deque
+from nicegui import ui, app as nicegui_app
+nicegui_app.config.socket_io_js_transports = ['polling', 'websocket']
 from plexapi.server import PlexServer
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 from .webhook_parser import parse_webhook
+from .ui import init_ui
 
 logger = logging.getLogger(__name__)
 
@@ -32,13 +34,12 @@ async def startup_event():
     main_loop = asyncio.get_running_loop()
     logging.getLogger().addHandler(ws_handler)
 
-SECRET_KEY = secrets.token_urlsafe(32)
-app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
+SECRET_KEY = os.environ.get("SECRET_KEY", "omniscan-default-fallback-secret-key-38472")
+app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY, max_age=2592000)  # 30 days session lifetime
 
 # Define paths
 BASE_DIR = os.path.dirname(os.path.dirname(__file__))
 ASSETS_PATH = os.path.join(BASE_DIR, 'assets')
-TEMPLATES_PATH = os.path.join(BASE_DIR, 'omniscan_pkg', 'templates')
 
 if os.path.exists(ASSETS_PATH):
     app.mount("/assets", StaticFiles(directory=ASSETS_PATH), name="assets")
@@ -55,12 +56,33 @@ def is_setup_completed():
     return bool(config_pass and config_pass.strip())
 
 class SettingsUpdate(BaseModel):
-    server_type: str; server_url: str; api_key: str; plex_server: str; plex_token: str; scan_directories: str
-    scan_workers: int; scan_debounce: int; scan_delay: float; use_polling: bool; watch_mode: bool; run_interval: int; run_on_startup: bool
-    start_time: Optional[str] = None; incremental_scan: bool; scan_since_days: int; symlink_check: bool
-    deletion_threshold: int; abort_on_mass_deletion: bool
-    notifications_enabled: bool; discord_webhook_url: str; ignore_patterns: str; log_level: str; path_rewrites: str
-    integrity_check: bool; ffprobe_check: bool
+    server_type: str
+    server_url: str
+    api_key: str
+    plex_server: str
+    plex_token: str
+    scan_directories: str
+    scan_workers: int
+    scan_debounce: int
+    scan_delay: float
+    use_polling: bool
+    watch_mode: bool
+    run_interval: int
+    run_on_startup: bool
+    start_time: Optional[str] = None
+    incremental_scan: bool
+    scan_since_days: int
+    symlink_check: bool
+    empty_trash: bool
+    deletion_threshold: int
+    abort_on_mass_deletion: bool
+    notifications_enabled: bool
+    discord_webhook_url: str
+    ignore_patterns: str
+    log_level: str
+    path_rewrites: str
+    integrity_check: bool
+    ffprobe_check: bool
 
 class SetupSubmit(BaseModel):
     username: str
@@ -72,14 +94,14 @@ class SetupSubmit(BaseModel):
     api_key: str
     scan_directories: str
 
+class LibraryScanRequest(BaseModel):
+    library_id: str
+
 def get_current_user(request: Request):
     if not is_setup_completed():
-        if request.url.path.startswith("/api"):
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Setup required")
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Setup required")
     user = request.session.get("user")
     if user: return user
-    if request.url.path.startswith("/api"): raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
     raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
 
 def verify_credentials(username, password):
@@ -90,14 +112,6 @@ def verify_credentials(username, password):
         return False
     return secrets.compare_digest(username, config_user) and secrets.compare_digest(password, config_pass)
 
-def load_template(filename):
-    try:
-        with open(os.path.join(TEMPLATES_PATH, filename), 'r') as f:
-            return f.read()
-    except Exception as e:
-        logger.error(f"Error loading template {filename}: {e}")
-        return f"Error loading template: {e}"
-
 recent_logs = deque(maxlen=100)
 
 class ConnectionManager:
@@ -107,7 +121,10 @@ class ConnectionManager:
         await websocket.accept()
         self.active_connections.append(websocket)
     def disconnect(self, websocket: WebSocket):
-        self.active_connections.remove(websocket)
+        try:
+            self.active_connections.remove(websocket)
+        except ValueError:
+            pass
     async def broadcast_to_clients(self, message: str):
         for connection in self.active_connections:
             try: await connection.send_text(message)
@@ -133,128 +150,8 @@ class WebSocketLogHandler(logging.Handler):
         except Exception:
             pass
 
-@app.get("/api/logs")
-async def get_logs(u: str = Depends(get_current_user)):
-    return list(recent_logs)
-
-@app.websocket("/ws/logs")
-async def websocket_endpoint(websocket: WebSocket):
-    await manager.connect(websocket)
-    try:
-        await websocket.send_text("INFO | >> System: Connected to Log Stream")
-        while True: await websocket.receive_text()
-    except WebSocketDisconnect:
-        manager.disconnect(websocket)
-
 ws_handler = WebSocketLogHandler()
 ws_handler.setFormatter(logging.Formatter('%(asctime)s | %(message)s', datefmt='%d %b %Y | %I:%M:%S %p'))
-
-@app.get("/setup", response_class=HTMLResponse)
-async def setup_page(request: Request):
-    if is_setup_completed():
-        return RedirectResponse(url="/", status_code=status.HTTP_302_FOUND)
-    return load_template("setup.html")
-
-@app.post("/api/test-connection-unauthenticated")
-async def test_conn_unauth(s: SettingsUpdate):
-    if is_setup_completed():
-        raise HTTPException(status_code=403, detail="Forbidden")
-    try:
-        if s.server_type == 'plex':
-            plex = PlexServer(s.plex_server, s.plex_token); return {"status": "success", "message": f"Linked to {plex.friendlyName}"}
-        else:
-            r = requests.get(f"{s.server_url}/System/Info", headers={"X-Emby-Token": s.api_key}, timeout=5); r.raise_for_status()
-            return {"status": "success", "message": f"Linked to {s.server_type.capitalize()}"}
-    except Exception as e: return JSONResponse({"status": "error", "message": str(e)}, status_code=400)
-
-@app.post("/api/setup")
-async def setup_submit(r: SetupSubmit, request: Request):
-    if is_setup_completed():
-        return JSONResponse({"status": "error", "error": "Setup already completed"}, status_code=400)
-    if not r.password.strip():
-        return JSONResponse({"status": "error", "error": "Password cannot be empty"}, status_code=400)
-        
-    c = scanner_instance.config
-    c['WEB_USERNAME'] = r.username
-    c['WEB_PASSWORD'] = r.password
-    c['SERVER_TYPE'] = r.server_type
-    c['PLEX_URL'] = r.plex_server
-    c['TOKEN'] = r.plex_token
-    c['SERVER_URL'] = r.server_url
-    c['API_KEY'] = r.api_key
-    c['SCAN_PATHS'] = [p.strip() for p in r.scan_directories.replace(',', '\n').split('\n') if p.strip()]
-
-    try:
-        cfg = configparser.ConfigParser(); cfg.read('config.ini')
-        for sec in ['server', 'plex', 'behaviour', 'notifications', 'scan', 'ignore', 'logs', 'rewrite', 'web']:
-            if not cfg.has_section(sec): cfg.add_section(sec)
-        cfg.set('web', 'username', str(c['WEB_USERNAME']))
-        cfg.set('web', 'password', str(c['WEB_PASSWORD']))
-        cfg.set('server', 'type', str(c['SERVER_TYPE']))
-        cfg.set('server', 'url', str(c['SERVER_URL']))
-        cfg.set('server', 'api_key', str(c['API_KEY']))
-        cfg.set('plex', 'server', str(c['PLEX_URL']))
-        cfg.set('plex', 'token', str(c['TOKEN']))
-        cfg.set('scan', 'directories', ",".join(c['SCAN_PATHS']))
-        
-        with open('config.ini', 'w') as f: cfg.write(f)
-        
-        # Re-initialize backend configurations
-        if c['SERVER_TYPE'] == 'plex':
-            scanner_instance.connect_to_plex(retry=False)
-            scanner_instance.get_library_ids()
-        
-        # Log user in
-        request.session["user"] = r.username
-        return {"status": "success"}
-    except Exception as e:
-        return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
-
-@app.get("/login", response_class=HTMLResponse)
-async def login_page(request: Request, error: Optional[str] = None):
-    if not is_setup_completed():
-        return RedirectResponse(url="/setup", status_code=status.HTTP_302_FOUND)
-    html = load_template("login.html")
-    err_h = f'<div class="bg-red-500/10 p-4 mb-6 rounded-xl border border-red-500/20 text-red-400 text-xs font-bold uppercase">{error}</div>' if error else ""
-    return html.replace("__ERROR__", err_h)
-
-@app.post("/login")
-async def login(request: Request, username: str = Form(...), password: str = Form(...)):
-    if not is_setup_completed():
-        return RedirectResponse(url="/setup", status_code=status.HTTP_302_FOUND)
-    if verify_credentials(username, password):
-        request.session["user"] = username
-        return RedirectResponse(url="/", status_code=status.HTTP_303_SEE_OTHER)
-    return RedirectResponse(url="/login?error=Invalid Credentials", status_code=status.HTTP_303_SEE_OTHER)
-
-@app.get("/logout")
-async def logout(request: Request):
-    request.session.clear()
-    return RedirectResponse(url="/login", status_code=status.HTTP_303_SEE_OTHER)
-
-@app.get("/health")
-async def health_check():
-    return {"status": "ok"} if scanner_instance else JSONResponse(status_code=503, content={"status": "init"})
-
-@app.get("/metrics")
-async def metrics(): return HTMLResponse(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
-
-@app.get("/api/history")
-async def get_history(search: Optional[str] = None, offset: int = 0, u: str = Depends(get_current_user)):
-    if not scanner_instance: return []
-    return scanner_instance.history.get_history(limit=50, offset=offset, search=search)
-
-@app.post("/api/history/clear")
-async def clear_history(u: str = Depends(get_current_user)):
-    if not scanner_instance: return JSONResponse({"error": "init"}, status_code=500)
-    try:
-        conn = sqlite3.connect('history.db')
-        c = conn.cursor()
-        c.execute("DELETE FROM events")
-        conn.commit()
-        conn.close()
-        return {"status": "success"}
-    except Exception as e: return JSONResponse({"error": str(e)}, status_code=500)
 
 def mask_s(v): return (v[:4] + "****" + v[-4:]) if v and len(v) >= 8 else "********"
 def unmask_v(n, r): return r if n == mask_s(r) else n
@@ -268,15 +165,63 @@ def get_storage_info(paths):
     usage = {}
     for p in paths:
         try:
-            if not os.path.exists(p): continue
-            mount = os.path.abspath(p)
-            while not os.path.ismount(mount) and mount != '/': mount = os.path.dirname(mount)
-            if mount in usage: continue
-            total, used, free = shutil.disk_usage(mount)
-            usage[mount] = {"path": mount, "total": fmt_size(total), "used": fmt_size(used), "free": fmt_size(free), "percent": int((used/total)*100)}
+            p_obj = pathlib.Path(p)
+            if p_obj.exists():
+                stat = os.statvfs(p)
+                total = stat.f_blocks * stat.f_frsize
+                free = stat.f_bavail * stat.f_frsize
+                used = total - free
+                pct = (used / total) * 100 if total > 0 else 0
+                usage[total] = {
+                    "path": p,
+                    "total": fmt_size(total),
+                    "used": fmt_size(used),
+                    "free": fmt_size(free),
+                    "percent": f"{pct:.1f}%"
+                }
         except Exception as e:
             logger.debug(f"Failed to get storage info for {p}: {e}")
     return list(usage.values())
+
+# --- API Routes ---
+
+@app.get("/health")
+async def health_check():
+    return {"status": "ok"} if scanner_instance else JSONResponse(status_code=503, content={"status": "init"})
+
+@app.get("/metrics")
+async def metrics(): 
+    return HTMLResponse(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+@app.get("/api/logs")
+async def get_logs_route(u: str = Depends(get_current_user)):
+    return list(recent_logs)
+
+@app.websocket("/ws/logs")
+async def websocket_endpoint(websocket: WebSocket):
+    await manager.connect(websocket)
+    try:
+        await websocket.send_text("INFO | >> System: Connected to Log Stream")
+        while True: await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+
+@app.get("/api/history")
+async def get_history(search: Optional[str] = None, offset: int = 0, u: str = Depends(get_current_user)):
+    if not scanner_instance: return []
+    return scanner_instance.history.get_history(limit=50, offset=offset, search=search)
+
+@app.post("/api/history/clear")
+async def clear_history(u: str = Depends(get_current_user)):
+    if not scanner_instance: return JSONResponse({"error": "init"}, status_code=500)
+    try:
+        conn = sqlite3.connect("history.db")
+        c = conn.cursor()
+        c.execute("DELETE FROM events")
+        conn.commit()
+        conn.close()
+        return {"status": "success"}
+    except Exception as e: return JSONResponse({"error": str(e)}, status_code=400)
 
 @app.get("/api/stats")
 async def get_stats(u: str = Depends(get_current_user)):
@@ -310,19 +255,39 @@ async def get_stats(u: str = Depends(get_current_user)):
     corrupt_count = scanner_instance.history.get_corrupt_count()
 
     return {
-        "libraries": lib_stats, "pending": p, "watching_count": len(cfg.get('SCAN_PATHS', [])), "watching_paths": cfg.get('SCAN_PATHS', []),
+        "libraries": lib_stats,
+        "pending": p,
+        "watching_count": len(cfg.get('SCAN_PATHS', [])),
+        "watching_paths": cfg.get('SCAN_PATHS', []),
         "storage": storage,
         "corrupt_count": corrupt_count,
-        "is_scanning": scanner_instance.is_scanning, "uptime": datetime.now().strftime("%H:%M:%S"),
+        "is_scanning": scanner_instance.is_scanning,
+        "uptime": datetime.now().strftime("%H:%M:%S"),
         "config": {
-            "server_type": cfg.get('SERVER_TYPE'), "server_url": mask_s(cfg.get('SERVER_URL', '')), "api_key": mask_s(cfg.get('API_KEY', '')),
-            "plex_server": cfg.get('PLEX_URL'), "plex_token": mask_s(cfg.get('TOKEN', '')), "scan_directories": "\n".join(cfg.get('SCAN_PATHS', [])),
-            "scan_workers": cfg.get('SCAN_WORKERS'), "scan_debounce": cfg.get('SCAN_DEBOUNCE'), "scan_delay": cfg.get('SCAN_DELAY'),
-            "use_polling": cfg.get('USE_POLLING'), "watch_mode": cfg.get('WATCH_MODE'), "run_interval": cfg.get('RUN_INTERVAL'), "run_on_startup": cfg.get('RUN_ON_STARTUP'),
-            "start_time": cfg.get('START_TIME'), "incremental_scan": cfg.get('INCREMENTAL_SCAN'), "scan_since_days": cfg.get('SCAN_SINCE_DAYS'),
-            "symlink_check": cfg.get('SYMLINK_CHECK'), "deletion_threshold": cfg.get('DELETION_THRESHOLD'), "abort_on_mass_deletion": cfg.get('ABORT_ON_MASS_DELETION'),
+            "server_type": cfg.get('SERVER_TYPE'),
+            "server_url": mask_s(cfg.get('SERVER_URL', '')),
+            "api_key": mask_s(cfg.get('API_KEY', '')),
+            "plex_server": cfg.get('PLEX_URL'),
+            "plex_token": mask_s(cfg.get('TOKEN', '')),
+            "scan_directories": "\n".join(cfg.get('SCAN_PATHS', [])),
+            "scan_workers": cfg.get('SCAN_WORKERS'),
+            "scan_debounce": cfg.get('SCAN_DEBOUNCE'),
+            "scan_delay": cfg.get('SCAN_DELAY'),
+            "use_polling": cfg.get('USE_POLLING'),
+            "watch_mode": cfg.get('WATCH_MODE'),
+            "run_interval": cfg.get('RUN_INTERVAL'),
+            "run_on_startup": cfg.get('RUN_ON_STARTUP'),
+            "start_time": cfg.get('START_TIME'),
+            "incremental_scan": cfg.get('INCREMENTAL_SCAN'),
+            "scan_since_days": cfg.get('SCAN_SINCE_DAYS'),
+            "symlink_check": cfg.get('SYMLINK_CHECK'),
+            "empty_trash": cfg.get('EMPTY_TRASH'),
+            "deletion_threshold": cfg.get('DELETION_THRESHOLD'),
+            "abort_on_mass_deletion": cfg.get('ABORT_ON_MASS_DELETION'),
             "notifications_enabled": cfg.get('NOTIFICATIONS_ENABLED'),
-            "discord_webhook_url": mask_s(cfg.get('DISCORD_WEBHOOK_URL')), "ignore_patterns": "\n".join(cfg.get('IGNORE_PATTERNS', [])), "log_level": cfg.get('LOG_LEVEL'),
+            "discord_webhook_url": mask_s(cfg.get('DISCORD_WEBHOOK_URL')),
+            "ignore_patterns": "\n".join(cfg.get('IGNORE_PATTERNS', [])),
+            "log_level": cfg.get('LOG_LEVEL'),
             "path_rewrites": "\n".join([f"{src}:{dst}" for src, dst in cfg.get('PATH_REWRITES', [])]),
             "integrity_check": cfg.get('INTEGRITY_CHECK'),
             "ffprobe_check": cfg.get('FFPROBE_CHECK')
@@ -332,26 +297,22 @@ async def get_stats(u: str = Depends(get_current_user)):
 @app.post("/api/scan-all")
 async def trigger_full_scan(u: str = Depends(get_current_user)):
     if not scanner_instance or scanner_instance.is_scanning: return JSONResponse({"error": "busy"}, status_code=409)
-    import threading; threading.Thread(target=scanner_instance.run_scan, daemon=True).start()
+    import threading
+    threading.Thread(target=scanner_instance.run_scan, daemon=True).start()
     return {"status": "success"}
-
-class LibraryScanRequest(BaseModel):
-    library_id: str
 
 @app.post("/api/scan-library")
 async def scan_library(r: LibraryScanRequest, u: str = Depends(get_current_user)):
     if not scanner_instance: return JSONResponse({"error": "init"}, status_code=500)
     target_id = str(r.library_id)
     found = False
-    # Access cache safely
     sections = scanner_instance.library_sections_cache
     for section in sections:
-        if str(section['id']) == target_id:
+        if str(section["id"]) == target_id:
             found = True
-            for location in section['locations']:
+            for location in section["locations"]:
                 scanner_instance.trigger_scan(target_id, location, force=True)
             break
-    
     if not found: return JSONResponse({"error": "Library not found"}, status_code=404)
     return {"status": "success", "message": "Scan triggered"}
 
@@ -362,28 +323,108 @@ async def test_conn(s: SettingsUpdate, u: str = Depends(get_current_user)):
     ru = unmask_v(s.server_url, scanner_instance.config.get('SERVER_URL', ''))
     try:
         if s.server_type == 'plex':
-            plex = PlexServer(s.plex_server, rt); return {"status": "success", "message": f"Linked to {plex.friendlyName}"}
+            plex = PlexServer(s.plex_server, rt)
+            return {"status": "success", "message": f"Linked to {plex.friendlyName}"}
         else:
-            r = requests.get(f"{ru}/System/Info", headers={"X-Emby-Token": rk}, timeout=5); r.raise_for_status()
+            r = requests.get(f"{ru}/System/Info", headers={"X-Emby-Token": rk}, timeout=5)
+            r.raise_for_status()
             return {"status": "success", "message": f"Linked to {s.server_type.capitalize()}"}
     except Exception as e: return JSONResponse({"status": "error", "message": str(e)}, status_code=400)
+
+@app.post("/api/test-connection-unauthenticated")
+async def test_conn_unauth(s: SettingsUpdate):
+    if is_setup_completed():
+        raise HTTPException(status_code=403, detail="Forbidden")
+    try:
+        if s.server_type == 'plex':
+            plex = PlexServer(s.plex_server, s.plex_token)
+            return {"status": "success", "message": f"Linked to {plex.friendlyName}"}
+        else:
+            r = requests.get(f"{s.server_url}/System/Info", headers={"X-Emby-Token": s.api_key}, timeout=5)
+            r.raise_for_status()
+            return {"status": "success", "message": f"Linked to {s.server_type.capitalize()}"}
+    except Exception as e: return JSONResponse({"status": "error", "message": str(e)}, status_code=400)
+
+@app.post("/api/setup")
+async def setup_submit(r: SetupSubmit, request: Request):
+    if is_setup_completed():
+        return JSONResponse({"status": "error", "error": "Setup already completed"}, status_code=400)
+    if not r.password.strip():
+        return JSONResponse({"status": "error", "error": "Password cannot be empty"}, status_code=400)
+    
+    c = scanner_instance.config
+    c['WEB_USERNAME'] = r.username
+    c['WEB_PASSWORD'] = r.password
+    c['SERVER_TYPE'] = r.server_type
+    c['PLEX_URL'] = r.plex_server
+    c['TOKEN'] = r.plex_token
+    c['SERVER_URL'] = r.server_url
+    c['API_KEY'] = r.api_key
+    c['SCAN_PATHS'] = [p.strip() for p in r.scan_directories.replace(',', '\n').split('\n') if p.strip()]
+
+    try:
+        cfg = configparser.ConfigParser()
+        cfg.read('config.ini')
+        
+        sections_to_check = ['web', 'server', 'plex', 'scan']
+        for sec in sections_to_check:
+            if not cfg.has_section(sec):
+                cfg.add_section(sec)
+        
+        cfg.set('web', 'username', str(c['WEB_USERNAME']))
+        cfg.set('web', 'password', str(c['WEB_PASSWORD']))
+        cfg.set('server', 'type', str(c['SERVER_TYPE']))
+        cfg.set('server', 'url', str(c['SERVER_URL']))
+        cfg.set('server', 'api_key', str(c['API_KEY']))
+        cfg.set('plex', 'server', str(c['PLEX_URL']))
+        cfg.set('plex', 'token', str(c['TOKEN']))
+        cfg.set('scan', 'directories', ",".join(c['SCAN_PATHS']))
+
+        with open('config.ini', 'w') as f:
+            cfg.write(f)
+
+        request.session["user"] = r.username
+        
+        # Connect & reload
+        if c['SERVER_TYPE'] == 'plex':
+            scanner_instance.connect_to_plex(retry=False)
+            scanner_instance.get_library_ids()
+            
+        return {"status": "success"}
+    except Exception as e:
+        logger.error(f"Setup save error: {e}")
+        return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
 
 @app.post("/api/settings")
 async def update_settings(s: SettingsUpdate, u: str = Depends(get_current_user)):
     if not scanner_instance: return JSONResponse({"error": "init"}, status_code=500)
     c = scanner_instance.config
-    c['SERVER_TYPE'] = s.server_type; c['SERVER_URL'] = unmask_v(s.server_url, c.get('SERVER_URL', '')); c['API_KEY'] = unmask_v(s.api_key, c.get('API_KEY', ''))
-    c['PLEX_URL'] = s.plex_server; c['TOKEN'] = unmask_v(s.plex_token, c.get('TOKEN', ''))
+    c['SERVER_TYPE'] = s.server_type
+    c['SERVER_URL'] = unmask_v(s.server_url, c.get('SERVER_URL', ''))
+    c['API_KEY'] = unmask_v(s.api_key, c.get('API_KEY', ''))
+    c['PLEX_URL'] = s.plex_server
+    c['TOKEN'] = unmask_v(s.plex_token, c.get('TOKEN', ''))
     c['SCAN_PATHS'] = [p.strip() for p in s.scan_directories.replace(',', '\n').split('\n') if p.strip()]
-    c['SCAN_WORKERS'] = s.scan_workers; c['SCAN_DEBOUNCE'] = s.scan_debounce; c['SCAN_DELAY'] = s.scan_delay
-    c['USE_POLLING'] = s.use_polling; c['WATCH_MODE'] = s.watch_mode; c['RUN_INTERVAL'] = s.run_interval; c['RUN_ON_STARTUP'] = s.run_on_startup; c['START_TIME'] = s.start_time
-    c['INCREMENTAL_SCAN'] = s.incremental_scan; c['SCAN_SINCE_DAYS'] = s.scan_since_days
+    c['SCAN_WORKERS'] = s.scan_workers
+    c['SCAN_DEBOUNCE'] = s.scan_debounce
+    c['SCAN_DELAY'] = s.scan_delay
+    c['USE_POLLING'] = s.use_polling
+    c['WATCH_MODE'] = s.watch_mode
+    c['RUN_INTERVAL'] = s.run_interval
+    c['RUN_ON_STARTUP'] = s.run_on_startup
+    c['START_TIME'] = s.start_time
+    c['INCREMENTAL_SCAN'] = s.incremental_scan
+    c['SCAN_SINCE_DAYS'] = s.scan_since_days
     c['SYMLINK_CHECK'] = s.symlink_check
-    c['DELETION_THRESHOLD'] = s.deletion_threshold; c['ABORT_ON_MASS_DELETION'] = s.abort_on_mass_deletion
-    c['NOTIFICATIONS_ENABLED'] = s.notifications_enabled; c['DISCORD_WEBHOOK_URL'] = unmask_v(s.discord_webhook_url, c.get('DISCORD_WEBHOOK_URL', ''))
-    c['IGNORE_PATTERNS'] = [p.strip() for p in s.ignore_patterns.replace(',', '\n').split('\n') if p.strip()]; c['LOG_LEVEL'] = s.log_level
+    c['EMPTY_TRASH'] = s.empty_trash
     c['INTEGRITY_CHECK'] = s.integrity_check
     c['FFPROBE_CHECK'] = s.ffprobe_check
+    c['DELETION_THRESHOLD'] = s.deletion_threshold
+    c['ABORT_ON_MASS_DELETION'] = s.abort_on_mass_deletion
+    c['NOTIFICATIONS_ENABLED'] = s.notifications_enabled
+    c['DISCORD_WEBHOOK_URL'] = unmask_v(s.discord_webhook_url, c.get('DISCORD_WEBHOOK_URL', ''))
+    c['IGNORE_PATTERNS'] = [p.strip() for p in s.ignore_patterns.replace(',', '\n').split('\n') if p.strip()]
+    c['LOG_LEVEL'] = s.log_level
     
     c['PATH_REWRITES'] = []
     for line in s.path_rewrites.replace(',', '\n').split('\n'):
@@ -394,30 +435,50 @@ async def update_settings(s: SettingsUpdate, u: str = Depends(get_current_user))
             c['PATH_REWRITES'].append((parts[0].strip(), parts[1].strip()))
 
     try:
-        cfg = configparser.ConfigParser(); cfg.read('config.ini')
+        cfg = configparser.ConfigParser()
+        cfg.read('config.ini')
         for sec in ['server', 'plex', 'behaviour', 'notifications', 'scan', 'ignore', 'logs', 'rewrite']:
             if not cfg.has_section(sec): cfg.add_section(sec)
-        cfg.set('server', 'type', str(c['SERVER_TYPE'])); cfg.set('server', 'url', str(c['SERVER_URL'])); cfg.set('server', 'api_key', str(c['API_KEY']))
-        cfg.set('plex', 'server', str(c['PLEX_URL'])); cfg.set('plex', 'token', str(c['TOKEN']))
-        cfg.set('scan', 'directories', ",".join(c['SCAN_PATHS']))
-        cfg.set('behaviour', 'scan_workers', str(c['SCAN_WORKERS'])); cfg.set('behaviour', 'scan_debounce', str(c['SCAN_DEBOUNCE'])); cfg.set('behaviour', 'scan_delay', str(c['SCAN_DELAY']))
-        cfg.set('behaviour', 'use_polling', str(c['USE_POLLING']).lower()); cfg.set('behaviour', 'watch', str(c['WATCH_MODE']).lower()); cfg.set('behaviour', 'run_interval', str(c['RUN_INTERVAL'])); cfg.set('behaviour', 'run_on_startup', str(c['RUN_ON_STARTUP']).lower())
-        cfg.set('behaviour', 'start_time', c['START_TIME'] if c['START_TIME'] else ""); cfg.set('behaviour', 'incremental_scan', str(c['INCREMENTAL_SCAN']).lower()); cfg.set('behaviour', 'scan_since_days', str(c['SCAN_SINCE_DAYS']))
+        cfg.set('server', 'type', str(c['SERVER_TYPE']))
+        cfg.set('server', 'url', str(c['SERVER_URL']))
+        cfg.set('server', 'api_key', str(c['API_KEY']))
+        cfg.set('plex', 'server', str(c['PLEX_URL']))
+        cfg.set('plex', 'token', str(c['TOKEN']))
+        cfg.set('behaviour', 'scan_workers', str(c['SCAN_WORKERS']))
+        cfg.set('behaviour', 'scan_debounce', str(c['SCAN_DEBOUNCE']))
+        cfg.set('behaviour', 'scan_delay', str(c['SCAN_DELAY']))
+        cfg.set('behaviour', 'use_polling', str(c['USE_POLLING']).lower())
+        cfg.set('behaviour', 'watch', str(c['WATCH_MODE']).lower())
+        cfg.set('behaviour', 'run_interval', str(c['RUN_INTERVAL']))
+        cfg.set('behaviour', 'run_on_startup', str(c['RUN_ON_STARTUP']).lower())
+        cfg.set('behaviour', 'start_time', c['START_TIME'] if c['START_TIME'] else "")
+        cfg.set('behaviour', 'incremental_scan', str(c['INCREMENTAL_SCAN']).lower())
+        cfg.set('behaviour', 'scan_since_days', str(c['SCAN_SINCE_DAYS']))
         cfg.set('behaviour', 'symlink_check', str(c['SYMLINK_CHECK']).lower())
+        cfg.set('behaviour', 'empty_trash', str(c['EMPTY_TRASH']).lower())
         cfg.set('behaviour', 'integrity_check', str(c['INTEGRITY_CHECK']).lower())
         cfg.set('behaviour', 'ffprobe_check', str(c['FFPROBE_CHECK']).lower())
-        cfg.set('behaviour', 'deletion_threshold', str(c['DELETION_THRESHOLD'])); cfg.set('behaviour', 'abort_on_mass_deletion', str(c['ABORT_ON_MASS_DELETION']).lower())
-        cfg.set('notifications', 'enabled', str(c['NOTIFICATIONS_ENABLED']).lower()); cfg.set('notifications', 'discord_webhook_url', str(c['DISCORD_WEBHOOK_URL']))
-        cfg.set('ignore', 'patterns', ",".join(c['IGNORE_PATTERNS'])); cfg.set('logs', 'loglevel', str(c['LOG_LEVEL']))
+        cfg.set('behaviour', 'deletion_threshold', str(c['DELETION_THRESHOLD']))
+        cfg.set('behaviour', 'abort_on_mass_deletion', str(c['ABORT_ON_MASS_DELETION']).lower())
+        cfg.set('notifications', 'enabled', str(c['NOTIFICATIONS_ENABLED']).lower())
+        cfg.set('notifications', 'discord_webhook_url', str(c['DISCORD_WEBHOOK_URL']))
+        cfg.set('ignore', 'patterns', ",".join(c['IGNORE_PATTERNS']))
+        cfg.set('logs', 'loglevel', str(c['LOG_LEVEL']))
         cfg.set('rewrite', 'mappings', ",".join([f"{src}:{dst}" for src, dst in c['PATH_REWRITES']]))
+        
         with open('config.ini', 'w') as f: cfg.write(f)
-        if c['SERVER_TYPE'] == 'plex': scanner_instance.connect_to_plex(retry=False); scanner_instance.get_library_ids()
+        
+        if c['SERVER_TYPE'] == 'plex': 
+            scanner_instance.connect_to_plex(retry=False)
+            scanner_instance.get_library_ids()
+            
         return {"status": "success"}
     except Exception as e: return JSONResponse({"error": str(e)}, status_code=500)
 
 @app.post("/api/restart")
 async def restart_system(u: str = Depends(get_current_user)):
-    import threading; threading.Thread(target=lambda: (time.sleep(1), os._exit(0))).start()
+    import threading
+    threading.Thread(target=lambda: (time.sleep(1), os._exit(0))).start()
     return {"status": "success"}
 
 @app.get("/api/browser/list")
@@ -432,7 +493,6 @@ async def list_f(path: str = None, query: str = None, u: str = Depends(get_curre
         search_roots = []
         
         if path:
-            # Search within specific allowed path
             rp = pathlib.Path(path).resolve()
             allowed = False
             for s in sp:
@@ -440,14 +500,12 @@ async def list_f(path: str = None, query: str = None, u: str = Depends(get_curre
                 if rp == bp or bp in rp.parents: allowed = True; break
             if allowed: search_roots = [str(rp)]
         else:
-            # Global search in all media roots
             search_roots = sp
 
         def perform_search():
             matches = []
             for root in search_roots:
                 for r, dirs, files in os.walk(root):
-                    # Check for matches in both dirs and files
                     for name in dirs + files:
                         if search_query in name.lower():
                             full_path = os.path.join(r, name)
@@ -481,15 +539,17 @@ async def list_f(path: str = None, query: str = None, u: str = Depends(get_curre
         with os.scandir(rp) as s:
             for e in s:
                 if not e.name.startswith('.'):
-                    stat = e.stat()
-                    it.append({
-                        "name": e.name, "path": e.path, "is_dir": e.is_dir(),
-                        "size": stat.st_size if e.is_file() else 0,
-                        "size_fmt": fmt_size(stat.st_size) if e.is_file() else "",
-                        "date": datetime.fromtimestamp(stat.st_mtime).strftime('%Y-%m-%d %H:%M'),
-                        "ext": os.path.splitext(e.name)[1].lower() if e.is_file() else None
-                    })
-        it.sort(key=lambda x: (not x.get('is_back'), not x.get('is_dir'), x['name'].lower()))
+                    try:
+                        stat = e.stat()
+                        it.append({
+                            "name": e.name, "path": e.path, "is_dir": e.is_dir(),
+                            "size": stat.st_size if e.is_file() else 0,
+                            "size_fmt": fmt_size(stat.st_size) if e.is_file() else "",
+                            "date": datetime.fromtimestamp(stat.st_mtime).strftime('%Y-%m-%d %H:%M'),
+                            "ext": os.path.splitext(e.name)[1].lower() if e.is_file() else None
+                        })
+                    except Exception:
+                        pass
         return {"current_path": str(rp), "items": it}
     except Exception as e:
         logger.error(f"Failed to list directory: {e}")
@@ -509,6 +569,7 @@ async def browser_act(d: dict, u: str = Depends(get_current_user)):
     except Exception as e:
         logger.error(f"Invalid path requested in browser action: {p} - {e}")
         return JSONResponse({"error": "invalid"}, status_code=400)
+    
     if a == 'scan':
         logger.info(f"Manual scan request for: {p}")
         if os.path.isfile(p): 
@@ -576,7 +637,8 @@ async def check_conn_status(u: str = Depends(get_current_user)):
             return {"status": "success", "message": f"{p.friendlyName}", "server": "Plex"}
         else:
             h = {"X-Emby-Token": token}
-            r = requests.get(f"{url}/System/Info", headers=h, timeout=5); r.raise_for_status()
+            r = requests.get(f"{url}/System/Info", headers=h, timeout=5)
+            r.raise_for_status()
             return {"status": "success", "message": "Online", "server": st.capitalize()}
     except Exception as e: return JSONResponse({"status": "error", "message": str(e)}, status_code=400)
 
@@ -636,7 +698,6 @@ async def webhook_trigger(request: Request):
                 rewritten_paths.add(os.path.normpath(p))
 
         # De-duplicate: If we have /Show/Season/Ep and /Show, keep only /Show/Season/Ep
-        # This prevents full series scans when a single episode is updated.
         sorted_paths = sorted([p for p in rewritten_paths if p], key=len, reverse=True)
         for p in sorted_paths:
             is_redundant = False
@@ -651,6 +712,7 @@ async def webhook_trigger(request: Request):
             return JSONResponse({"status": "ignored", "message": "No paths found in payload"}, status_code=200)
 
         triggered = 0
+        metadata = parse_webhook(data)
         for p in paths_to_scan:
             if not p: continue
             logger.info(f"Webhook trigger for: {p}")
@@ -682,8 +744,6 @@ async def webhook_trigger(request: Request):
                 lid, _, library_type = scanner_instance.get_library_id_for_path(p)
                 
                 # Only fallback if parent exists AND is not the library root
-                # For TV shows, we also avoid falling back to the "Show Root" folder if we can help it,
-                # as that triggers a full show scan.
                 if os.path.isdir(parent) and not scanner_instance.is_library_root(lid, parent):
                     if library_type == 'show' and scanner_instance.is_entity_root(parent):
                         logger.info(f"Webhook path missing, but parent is Show Root. Stopping fallback to avoid broad scan: {parent}")
@@ -701,14 +761,25 @@ async def webhook_trigger(request: Request):
         logger.error(f"Webhook error: {e}")
         return JSONResponse({"error": str(e)}, status_code=400)
 
-@app.get("/", response_class=HTMLResponse)
-async def index(request: Request):
+@app.post("/login")
+async def login_route(request: Request, username: str = Form(...), password: str = Form(...)):
     if not is_setup_completed():
         return RedirectResponse(url="/setup", status_code=status.HTTP_302_FOUND)
-    if not request.session.get("user"): return RedirectResponse(url="/login", status_code=status.HTTP_302_FOUND)
-    return load_template("index.html")
+    if verify_credentials(username, password):
+        request.session["user"] = username
+        return RedirectResponse(url="/", status_code=status.HTTP_303_SEE_OTHER)
+    return RedirectResponse(url="/login?error=Invalid Credentials", status_code=status.HTTP_303_SEE_OTHER)
+
+@app.get("/logout")
+async def logout_route(request: Request):
+    request.session.clear()
+    return RedirectResponse(url="/login", status_code=status.HTTP_303_SEE_OTHER)
+
+# --- Server Start ---
 
 def run_web_server(scanner, host="0.0.0.0", port=8000):
     import uvicorn
     set_scanner(scanner)
+    init_ui(app, scanner)  # Register NiceGUI pages
+    ui.run_with(app, title="Omniscan")
     uvicorn.run(app, host=host, port=port, log_level="error")
