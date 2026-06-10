@@ -64,6 +64,8 @@ def load_config(config_path='config.ini'):
     cfg['SCAN_DELAY'] = get_config_val(config, 'SCAN_DELAY', 'behaviour', 'scan_delay', 0.0, float)
     cfg['DELETION_THRESHOLD'] = get_config_val(config, 'DELETION_THRESHOLD', 'behaviour', 'deletion_threshold', 50, int)
     cfg['ABORT_ON_MASS_DELETION'] = get_config_val(config, 'ABORT_ON_MASS_DELETION', 'behaviour', 'abort_on_mass_deletion', 'true', lambda x: str(x).lower() == 'true')
+    cfg['INTEGRITY_CHECK'] = get_config_val(config, 'INTEGRITY_CHECK', 'behaviour', 'integrity_check', 'false', lambda x: str(x).lower() == 'true')
+    cfg['FFPROBE_CHECK'] = get_config_val(config, 'FFPROBE_CHECK', 'behaviour', 'ffprobe_check', 'false', lambda x: str(x).lower() == 'true')
 
     # Web Security
     cfg['WEB_USERNAME'] = get_config_val(config, 'WEB_USERNAME', 'web', 'username', 'admin')
@@ -75,11 +77,23 @@ def load_config(config_path='config.ini'):
     if cfg['SCAN_PATHS']:
         cfg['SCAN_PATHS'].sort()
 
+    # Parse Path Rewrites (from Autopulse features)
+    rewrites_raw = get_config_val(config, 'PATH_REWRITES', 'rewrite', 'mappings', '')
+    cfg['PATH_REWRITES'] = []
+    for line in rewrites_raw.replace(',', '\n').split('\n'):
+        line = line.strip()
+        if not line:
+            continue
+        if ':' in line:
+            parts = line.split(':', 1)
+            cfg['PATH_REWRITES'].append((parts[0].strip(), parts[1].strip()))
+
     # Parse Ignore Patterns
     ignore_patterns_raw = get_config_val(config, 'IGNORE_PATTERNS', 'ignore', 'patterns', '')
     cfg['IGNORE_PATTERNS'] = [p.strip() for p in ignore_patterns_raw.replace('\n', ',').split(',') if p.strip()]
     
-    # Media extensions
+    # MEDIA_EXTENSIONS: all file types that trigger a Plex folder scan.
+    # Subtitles are included so Plex re-scans when a new .srt appears.
     cfg['MEDIA_EXTENSIONS'] = {
         # Video
         '.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm',
@@ -87,8 +101,38 @@ def load_config(config_path='config.ini'):
         '.m2v', '.m2ts', '.ts', '.vob', '.iso', '.strm',
         # Audio
         '.mp3', '.flac', '.m4a', '.wav', '.ogg', '.opus', '.wma',
-        # Subtitles (Plex needs a scan to see new sidecar files)
+        # Subtitles (trigger folder scan only, not library check)
         '.srt', '.sub', '.ass', '.vtt'
     }
 
+    # Default LIBRARY_EXTENSIONS: file types that the media server actually
+    # indexes as individual library items. Only these are checked against
+    # is_in_library() to determine if a file is missing.
+    #
+    # Subtitle sidecars (.srt/.sub/.ass/.vtt) are intentionally excluded —
+    # Plex/Jellyfin never stores subtitle paths as library entries, so checking
+    # them would cause every subtitle to appear "missing" and pile up as stuck.
+    #
+    # Override via [scan] library_extensions in config.ini or the
+    # LIBRARY_EXTENSIONS env var (comma-separated list of extensions with dots):
+    #   e.g. library_extensions = .mkv,.mp4,.mp3,.flac,.epub,.mobi
+    _DEFAULT_LIBRARY_EXTENSIONS = (
+        # Video
+        '.mp4,.mkv,.avi,.mov,.wmv,.flv,.webm'
+        ',.m4v,.m4p,.m4b,.m4r,.3gp,.mpg,.mpeg'
+        ',.m2v,.m2ts,.ts,.vob,.iso,.strm'
+        # Audio
+        ',.mp3,.flac,.m4a,.wav,.ogg,.opus,.wma'
+    )
+    library_ext_raw = get_config_val(
+        config, 'LIBRARY_EXTENSIONS', 'scan', 'library_extensions',
+        _DEFAULT_LIBRARY_EXTENSIONS
+    )
+    cfg['LIBRARY_EXTENSIONS'] = {
+        e.strip().lower() if e.strip().startswith('.') else '.' + e.strip().lower()
+        for e in library_ext_raw.replace('\n', ',').split(',')
+        if e.strip()
+    }
+
     return cfg
+

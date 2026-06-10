@@ -18,6 +18,7 @@ from datetime import datetime
 from collections import deque
 from plexapi.server import PlexServer
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+from .webhook_parser import parse_webhook
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +49,34 @@ def set_scanner(scanner):
     global scanner_instance
     scanner_instance = scanner
 
+def is_setup_completed():
+    if not scanner_instance: return False
+    config_pass = scanner_instance.config.get('WEB_PASSWORD')
+    return bool(config_pass and config_pass.strip())
+
+class SettingsUpdate(BaseModel):
+    server_type: str; server_url: str; api_key: str; plex_server: str; plex_token: str; scan_directories: str
+    scan_workers: int; scan_debounce: int; scan_delay: float; use_polling: bool; watch_mode: bool; run_interval: int; run_on_startup: bool
+    start_time: Optional[str] = None; incremental_scan: bool; scan_since_days: int; symlink_check: bool
+    deletion_threshold: int; abort_on_mass_deletion: bool
+    notifications_enabled: bool; discord_webhook_url: str; ignore_patterns: str; log_level: str; path_rewrites: str
+    integrity_check: bool; ffprobe_check: bool
+
+class SetupSubmit(BaseModel):
+    username: str
+    password: str
+    server_type: str
+    plex_server: str
+    plex_token: str
+    server_url: str
+    api_key: str
+    scan_directories: str
+
 def get_current_user(request: Request):
+    if not is_setup_completed():
+        if request.url.path.startswith("/api"):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Setup required")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Setup required")
     user = request.session.get("user")
     if user: return user
     if request.url.path.startswith("/api"): raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
@@ -121,14 +149,79 @@ async def websocket_endpoint(websocket: WebSocket):
 ws_handler = WebSocketLogHandler()
 ws_handler.setFormatter(logging.Formatter('%(asctime)s | %(message)s', datefmt='%d %b %Y | %I:%M:%S %p'))
 
+@app.get("/setup", response_class=HTMLResponse)
+async def setup_page(request: Request):
+    if is_setup_completed():
+        return RedirectResponse(url="/", status_code=status.HTTP_302_FOUND)
+    return load_template("setup.html")
+
+@app.post("/api/test-connection-unauthenticated")
+async def test_conn_unauth(s: SettingsUpdate):
+    if is_setup_completed():
+        raise HTTPException(status_code=403, detail="Forbidden")
+    try:
+        if s.server_type == 'plex':
+            plex = PlexServer(s.plex_server, s.plex_token); return {"status": "success", "message": f"Linked to {plex.friendlyName}"}
+        else:
+            r = requests.get(f"{s.server_url}/System/Info", headers={"X-Emby-Token": s.api_key}, timeout=5); r.raise_for_status()
+            return {"status": "success", "message": f"Linked to {s.server_type.capitalize()}"}
+    except Exception as e: return JSONResponse({"status": "error", "message": str(e)}, status_code=400)
+
+@app.post("/api/setup")
+async def setup_submit(r: SetupSubmit, request: Request):
+    if is_setup_completed():
+        return JSONResponse({"status": "error", "error": "Setup already completed"}, status_code=400)
+    if not r.password.strip():
+        return JSONResponse({"status": "error", "error": "Password cannot be empty"}, status_code=400)
+        
+    c = scanner_instance.config
+    c['WEB_USERNAME'] = r.username
+    c['WEB_PASSWORD'] = r.password
+    c['SERVER_TYPE'] = r.server_type
+    c['PLEX_URL'] = r.plex_server
+    c['TOKEN'] = r.plex_token
+    c['SERVER_URL'] = r.server_url
+    c['API_KEY'] = r.api_key
+    c['SCAN_PATHS'] = [p.strip() for p in r.scan_directories.replace(',', '\n').split('\n') if p.strip()]
+
+    try:
+        cfg = configparser.ConfigParser(); cfg.read('config.ini')
+        for sec in ['server', 'plex', 'behaviour', 'notifications', 'scan', 'ignore', 'logs', 'rewrite', 'web']:
+            if not cfg.has_section(sec): cfg.add_section(sec)
+        cfg.set('web', 'username', str(c['WEB_USERNAME']))
+        cfg.set('web', 'password', str(c['WEB_PASSWORD']))
+        cfg.set('server', 'type', str(c['SERVER_TYPE']))
+        cfg.set('server', 'url', str(c['SERVER_URL']))
+        cfg.set('server', 'api_key', str(c['API_KEY']))
+        cfg.set('plex', 'server', str(c['PLEX_URL']))
+        cfg.set('plex', 'token', str(c['TOKEN']))
+        cfg.set('scan', 'directories', ",".join(c['SCAN_PATHS']))
+        
+        with open('config.ini', 'w') as f: cfg.write(f)
+        
+        # Re-initialize backend configurations
+        if c['SERVER_TYPE'] == 'plex':
+            scanner_instance.connect_to_plex(retry=False)
+            scanner_instance.get_library_ids()
+        
+        # Log user in
+        request.session["user"] = r.username
+        return {"status": "success"}
+    except Exception as e:
+        return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+
 @app.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request, error: Optional[str] = None):
+    if not is_setup_completed():
+        return RedirectResponse(url="/setup", status_code=status.HTTP_302_FOUND)
     html = load_template("login.html")
     err_h = f'<div class="bg-red-500/10 p-4 mb-6 rounded-xl border border-red-500/20 text-red-400 text-xs font-bold uppercase">{error}</div>' if error else ""
     return html.replace("__ERROR__", err_h)
 
 @app.post("/login")
 async def login(request: Request, username: str = Form(...), password: str = Form(...)):
+    if not is_setup_completed():
+        return RedirectResponse(url="/setup", status_code=status.HTTP_302_FOUND)
     if verify_credentials(username, password):
         request.session["user"] = username
         return RedirectResponse(url="/", status_code=status.HTTP_303_SEE_OTHER)
@@ -163,13 +256,6 @@ async def clear_history(u: str = Depends(get_current_user)):
         return {"status": "success"}
     except Exception as e: return JSONResponse({"error": str(e)}, status_code=500)
 
-class SettingsUpdate(BaseModel):
-    server_type: str; server_url: str; api_key: str; plex_server: str; plex_token: str; scan_directories: str
-    scan_workers: int; scan_debounce: int; scan_delay: float; use_polling: bool; watch_mode: bool; run_interval: int; run_on_startup: bool
-    start_time: Optional[str] = None; incremental_scan: bool; scan_since_days: int; symlink_check: bool
-    deletion_threshold: int; abort_on_mass_deletion: bool
-    notifications_enabled: bool; discord_webhook_url: str; ignore_patterns: str; log_level: str
-
 def mask_s(v): return (v[:4] + "****" + v[-4:]) if v and len(v) >= 8 else "********"
 def unmask_v(n, r): return r if n == mask_s(r) else n
 def fmt_size(size):
@@ -198,21 +284,35 @@ async def get_stats(u: str = Depends(get_current_user)):
     p = []
     with scanner_instance.pending_scans_lock:
         now = time.time()
-        for (lid, path), lt in scanner_instance.pending_scans.items():
-            p.append({"path": os.path.basename(path), "full_path": path, "remaining": max(0, int(scanner_instance.config.get('SCAN_DEBOUNCE', 10) - (now - lt)))})
+        for (lid, path, _), (lt, metadata) in scanner_instance.pending_scans.items():
+            name = metadata['name'] if metadata else os.path.basename(path)
+            details = metadata['details'] if metadata else ""
+            remaining = max(0, int(scanner_instance.config.get('SCAN_DEBOUNCE', 10) - (now - lt)))
+            p.append({
+                "path": path, 
+                "name": name, 
+                "details": details, 
+                "remaining": remaining
+            })
     
     lib_stats = []
     with scanner_instance.library_files_lock:
         for lib in scanner_instance.library_sections_cache:
-            count = len(scanner_instance.library_files.get(lib['id'], []))
+            lid = lib['id']
+            if lid not in scanner_instance.library_files:
+                scanner_instance._trigger_cache_fill(lid)
+            count = scanner_instance.library_counts.get(lid, len(scanner_instance.library_files.get(lid, [])))
             lib_stats.append({"title": lib['title'], "type": lib['type'], "count": count})
 
     cfg = scanner_instance.config
     storage = await asyncio.get_event_loop().run_in_executor(None, get_storage_info, cfg.get('SCAN_PATHS', []))
 
+    corrupt_count = scanner_instance.history.get_corrupt_count()
+
     return {
         "libraries": lib_stats, "pending": p, "watching_count": len(cfg.get('SCAN_PATHS', [])), "watching_paths": cfg.get('SCAN_PATHS', []),
         "storage": storage,
+        "corrupt_count": corrupt_count,
         "is_scanning": scanner_instance.is_scanning, "uptime": datetime.now().strftime("%H:%M:%S"),
         "config": {
             "server_type": cfg.get('SERVER_TYPE'), "server_url": mask_s(cfg.get('SERVER_URL', '')), "api_key": mask_s(cfg.get('API_KEY', '')),
@@ -222,7 +322,10 @@ async def get_stats(u: str = Depends(get_current_user)):
             "start_time": cfg.get('START_TIME'), "incremental_scan": cfg.get('INCREMENTAL_SCAN'), "scan_since_days": cfg.get('SCAN_SINCE_DAYS'),
             "symlink_check": cfg.get('SYMLINK_CHECK'), "deletion_threshold": cfg.get('DELETION_THRESHOLD'), "abort_on_mass_deletion": cfg.get('ABORT_ON_MASS_DELETION'),
             "notifications_enabled": cfg.get('NOTIFICATIONS_ENABLED'),
-            "discord_webhook_url": mask_s(cfg.get('DISCORD_WEBHOOK_URL')), "ignore_patterns": "\n".join(cfg.get('IGNORE_PATTERNS', [])), "log_level": cfg.get('LOG_LEVEL')
+            "discord_webhook_url": mask_s(cfg.get('DISCORD_WEBHOOK_URL')), "ignore_patterns": "\n".join(cfg.get('IGNORE_PATTERNS', [])), "log_level": cfg.get('LOG_LEVEL'),
+            "path_rewrites": "\n".join([f"{src}:{dst}" for src, dst in cfg.get('PATH_REWRITES', [])]),
+            "integrity_check": cfg.get('INTEGRITY_CHECK'),
+            "ffprobe_check": cfg.get('FFPROBE_CHECK')
         }
     }
 
@@ -279,9 +382,20 @@ async def update_settings(s: SettingsUpdate, u: str = Depends(get_current_user))
     c['DELETION_THRESHOLD'] = s.deletion_threshold; c['ABORT_ON_MASS_DELETION'] = s.abort_on_mass_deletion
     c['NOTIFICATIONS_ENABLED'] = s.notifications_enabled; c['DISCORD_WEBHOOK_URL'] = unmask_v(s.discord_webhook_url, c.get('DISCORD_WEBHOOK_URL', ''))
     c['IGNORE_PATTERNS'] = [p.strip() for p in s.ignore_patterns.replace(',', '\n').split('\n') if p.strip()]; c['LOG_LEVEL'] = s.log_level
+    c['INTEGRITY_CHECK'] = s.integrity_check
+    c['FFPROBE_CHECK'] = s.ffprobe_check
+    
+    c['PATH_REWRITES'] = []
+    for line in s.path_rewrites.replace(',', '\n').split('\n'):
+        line = line.strip()
+        if not line: continue
+        if ':' in line:
+            parts = line.split(':', 1)
+            c['PATH_REWRITES'].append((parts[0].strip(), parts[1].strip()))
+
     try:
         cfg = configparser.ConfigParser(); cfg.read('config.ini')
-        for sec in ['server', 'plex', 'behaviour', 'notifications', 'scan', 'ignore', 'logs']:
+        for sec in ['server', 'plex', 'behaviour', 'notifications', 'scan', 'ignore', 'logs', 'rewrite']:
             if not cfg.has_section(sec): cfg.add_section(sec)
         cfg.set('server', 'type', str(c['SERVER_TYPE'])); cfg.set('server', 'url', str(c['SERVER_URL'])); cfg.set('server', 'api_key', str(c['API_KEY']))
         cfg.set('plex', 'server', str(c['PLEX_URL'])); cfg.set('plex', 'token', str(c['TOKEN']))
@@ -290,9 +404,12 @@ async def update_settings(s: SettingsUpdate, u: str = Depends(get_current_user))
         cfg.set('behaviour', 'use_polling', str(c['USE_POLLING']).lower()); cfg.set('behaviour', 'watch', str(c['WATCH_MODE']).lower()); cfg.set('behaviour', 'run_interval', str(c['RUN_INTERVAL'])); cfg.set('behaviour', 'run_on_startup', str(c['RUN_ON_STARTUP']).lower())
         cfg.set('behaviour', 'start_time', c['START_TIME'] if c['START_TIME'] else ""); cfg.set('behaviour', 'incremental_scan', str(c['INCREMENTAL_SCAN']).lower()); cfg.set('behaviour', 'scan_since_days', str(c['SCAN_SINCE_DAYS']))
         cfg.set('behaviour', 'symlink_check', str(c['SYMLINK_CHECK']).lower())
+        cfg.set('behaviour', 'integrity_check', str(c['INTEGRITY_CHECK']).lower())
+        cfg.set('behaviour', 'ffprobe_check', str(c['FFPROBE_CHECK']).lower())
         cfg.set('behaviour', 'deletion_threshold', str(c['DELETION_THRESHOLD'])); cfg.set('behaviour', 'abort_on_mass_deletion', str(c['ABORT_ON_MASS_DELETION']).lower())
         cfg.set('notifications', 'enabled', str(c['NOTIFICATIONS_ENABLED']).lower()); cfg.set('notifications', 'discord_webhook_url', str(c['DISCORD_WEBHOOK_URL']))
         cfg.set('ignore', 'patterns', ",".join(c['IGNORE_PATTERNS'])); cfg.set('logs', 'loglevel', str(c['LOG_LEVEL']))
+        cfg.set('rewrite', 'mappings', ",".join([f"{src}:{dst}" for src, dst in c['PATH_REWRITES']]))
         with open('config.ini', 'w') as f: cfg.write(f)
         if c['SERVER_TYPE'] == 'plex': scanner_instance.connect_to_plex(retry=False); scanner_instance.get_library_ids()
         return {"status": "success"}
@@ -486,13 +603,41 @@ async def webhook_trigger(request: Request):
         if 'series' in data and 'path' in data['series']: raw_paths.add(data['series']['path'])
         if 'episodeFile' in data and 'path' in data['episodeFile']: raw_paths.add(data['episodeFile']['path'])
         
+        # 3. Lidarr (Music)
+        if 'artist' in data and 'path' in data['artist']: raw_paths.add(data['artist']['path'])
+        if 'trackFile' in data and 'path' in data['trackFile']: raw_paths.add(data['trackFile']['path'])
+        if 'trackFiles' in data and isinstance(data['trackFiles'], list):
+            for tf in data['trackFiles']:
+                if isinstance(tf, dict) and 'path' in tf:
+                    raw_paths.add(tf['path'])
+        
+        # 4. Readarr (Books)
+        if 'author' in data and 'path' in data['author']: raw_paths.add(data['author']['path'])
+        if 'bookFile' in data and 'path' in data['bookFile']: raw_paths.add(data['bookFile']['path'])
+        
         # Rename (source/dest)
         if 'sourcePath' in data: raw_paths.add(data['sourcePath'])
         if 'destPath' in data: raw_paths.add(data['destPath'])
 
+        # Apply path rewrites (Autopulse feature)
+        rewrites = scanner_instance.config.get('PATH_REWRITES', [])
+        rewritten_paths = set()
+        for p in raw_paths:
+            if not p: continue
+            rewrote = False
+            for src, dst in rewrites:
+                if p.startswith(src):
+                    new_p = os.path.normpath(p.replace(src, dst, 1))
+                    logger.info(f"Webhook path rewrote: {p} -> {new_p}")
+                    rewritten_paths.add(new_p)
+                    rewrote = True
+                    break
+            if not rewrote:
+                rewritten_paths.add(os.path.normpath(p))
+
         # De-duplicate: If we have /Show/Season/Ep and /Show, keep only /Show/Season/Ep
         # This prevents full series scans when a single episode is updated.
-        sorted_paths = sorted([p for p in raw_paths if p], key=len, reverse=True)
+        sorted_paths = sorted([p for p in rewritten_paths if p], key=len, reverse=True)
         for p in sorted_paths:
             is_redundant = False
             for existing in paths_to_scan:
@@ -527,7 +672,7 @@ async def webhook_trigger(request: Request):
                 elif os.path.isdir(p):
                     lid, _, _ = scanner_instance.get_library_id_for_path(p)
                     if lid:
-                        scanner_instance.trigger_scan(lid, p)
+                        scanner_instance.trigger_scan(lid, p, metadata=metadata)
                         triggered += 1
                     else:
                         logger.warning(f"Webhook path not in library: {p}")
@@ -545,7 +690,7 @@ async def webhook_trigger(request: Request):
                     else:
                         logger.info(f"Webhook path missing, falling back to parent: {parent}")
                         if lid:
-                            scanner_instance.trigger_scan(lid, parent)
+                            scanner_instance.trigger_scan(lid, parent, metadata=metadata)
                             triggered += 1
                 else:
                     logger.warning(f"Webhook path does not exist: {p}")
@@ -558,6 +703,8 @@ async def webhook_trigger(request: Request):
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
+    if not is_setup_completed():
+        return RedirectResponse(url="/setup", status_code=status.HTTP_302_FOUND)
     if not request.session.get("user"): return RedirectResponse(url="/login", status_code=status.HTTP_302_FOUND)
     return load_template("index.html")
 

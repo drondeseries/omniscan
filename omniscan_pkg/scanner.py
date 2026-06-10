@@ -49,6 +49,8 @@ class PlexScanner:
         self.library_paths = {}
         self.library_sections_cache = []
         self.library_files = {} # Changed to dict for easier clearing
+        self.library_counts = {} # Store last known counts when cache is invalidated
+        self.library_missing_counts = {} # Store count of missing files per library
         self.library_files_lock = threading.Lock()
         self.loading_libraries = set()
         self.loading_lock = threading.Lock()
@@ -160,7 +162,7 @@ class PlexScanner:
             if not self.plex: return {}
             for section in self.plex.library.sections():
                 lib_type = section.type
-                lib_key = section.key
+                lib_key = str(section.key)
                 lib_title = section.title
                 self.library_ids[lib_type] = lib_key
                 
@@ -236,6 +238,7 @@ class PlexScanner:
 
     def cache_library_files(self, library_id):
         """Cache all files in a library section using paginated fetching to save memory."""
+        library_id = str(library_id)
         with self.library_files_lock:
             if library_id in self.library_files and self.library_files[library_id]:
                 return
@@ -258,11 +261,11 @@ class PlexScanner:
             while True:
                 items = []
                 if section.type == 'show':
-                    items = section.search(libtype='episode', start=start, size=batch_size)
+                    items = section.search(libtype='episode', container_start=start, maxresults=batch_size)
                 elif section.type == 'artist':
-                    items = section.search(libtype='track', start=start, size=batch_size)
+                    items = section.search(libtype='track', container_start=start, maxresults=batch_size)
                 else:
-                    items = section.all(start=start, size=batch_size)
+                    items = section.all(container_start=start, maxresults=batch_size)
 
                 if not items:
                     break
@@ -286,6 +289,7 @@ class PlexScanner:
 
             with self.library_files_lock:
                 self.library_files[library_id] = new_files
+                self.library_counts[library_id] = len(new_files)
 
             cache_time = time.time() - cache_start
             logger.info(f"💾 Cache initialized for library {BOLD}{section.title}{RESET}: {BOLD}{count}{RESET} files in {BOLD}{cache_time:.2f}{RESET} seconds")
@@ -305,9 +309,47 @@ class PlexScanner:
     def _background_cache_fill(self, library_id):
         try:
             self.cache_library_files(library_id)
+            missing_count = self.calculate_missing_files_for_library(library_id)
+            with self.library_files_lock:
+                self.library_missing_counts[str(library_id)] = missing_count
+        except Exception as e:
+            logger.error(f"Error in background cache fill for library {library_id}: {e}")
         finally:
             with self.loading_lock:
                 self.loading_libraries.discard(library_id)
+
+    def calculate_missing_files_for_library(self, library_id):
+        """Walks disk directories for a library and returns the number of files missing from the media server."""
+        library_id = str(library_id)
+        section = None
+        for s in self.library_sections_cache:
+            if str(s['id']) == library_id:
+                section = s
+                break
+        if not section:
+            return 0
+        
+        with self.library_files_lock:
+            cached_files = self.library_files.get(library_id)
+            if cached_files is None:
+                return 0
+        
+        missing_count = 0
+        lib_exts = self.config.get('LIBRARY_EXTENSIONS', set())
+        
+        for loc in section.get('locations', []):
+            if not os.path.exists(loc):
+                continue
+            for root, _, files in os.walk(loc):
+                for f in files:
+                    ext = os.path.splitext(f)[1].lower()
+                    if ext in lib_exts:
+                        full_path = os.path.join(root, f)
+                        norm_path = os.path.normpath(full_path)
+                        if norm_path not in cached_files:
+                            missing_count += 1
+                            
+        return missing_count
 
     def is_in_library(self, file_path):
         """Check if a file exists in the media server."""
@@ -443,6 +485,7 @@ class PlexScanner:
             
             with self.library_files_lock:
                 self.library_files[library_id] = new_files
+                self.library_counts[library_id] = len(new_files)
             
             logger.info(f"💾 Cached {len(new_files)} items for {self.config['SERVER_TYPE']} library {library_id}")
         except Exception as e:
@@ -515,25 +558,33 @@ class PlexScanner:
                     
         return False
 
-    def trigger_scan(self, library_id, folder_path, force=False):
+    def trigger_scan(self, library_id, folder_path, force=False, metadata=None):
         """Enqueue a library scan for a specific folder."""
         if force:
             self._do_trigger_scan(library_id, folder_path)
             return
 
         with self.pending_scans_lock:
-            # OPTIMIZATION: Check if we already have a more specific scan pending (a child of this folder)
-            # This prevents broad scans (like Show root) from overriding specific ones (like Season)
-            # during the same debounce window.
-            for (pid, ppath) in self.pending_scans:
-                # Use a separator check to ensure it's a subpath and not a partial string match
-                if pid == library_id and (ppath.startswith(folder_path + os.sep) or ppath == folder_path):
-                    logger.debug(f"⏳ Skipping broad scan for {folder_path} as specific child {ppath} is already pending")
-                    return
+            # Check for parent/child redundancies
+            keys_to_remove = []
+            for (pid, ppath, _) in list(self.pending_scans.keys()):
+                if pid == library_id:
+                    # Case 1: A parent/ancestor of the new folder is already pending scan.
+                    if folder_path.startswith(ppath + os.sep) or ppath == folder_path:
+                        logger.debug(f"⏳ Skipping specific scan for {folder_path} as broad parent {ppath} is already pending")
+                        return
 
-            is_new = (library_id, folder_path) not in self.pending_scans
+                    # Case 2: The new folder is a parent/ancestor of an already pending scan.
+                    if ppath.startswith(folder_path + os.sep):
+                        logger.debug(f"⏳ Removing specific pending scan {ppath} in favor of broad parent scan {folder_path}")
+                        keys_to_remove.append((pid, ppath, _))
+
+            for k in keys_to_remove:
+                del self.pending_scans[k]
+
+            is_new = (library_id, folder_path, None) not in self.pending_scans
             # Update the last event time for this (library, folder)
-            self.pending_scans[(library_id, folder_path)] = time.time()
+            self.pending_scans[(library_id, folder_path, None)] = (time.time(), metadata)
             if is_new:
                 logger.info(f"⏳ Scan queued (debouncing): {BOLD}{folder_path}{RESET}")
 
@@ -558,10 +609,10 @@ class PlexScanner:
                     debounce_delay = self.config.get('SCAN_DEBOUNCE', 10)
                     
                     # 1. Process Scans that are ready
-                    for key, last_time in list(self.pending_scans.items()):
+                    for key, (last_time, metadata) in list(self.pending_scans.items()):
                         if now - last_time >= debounce_delay:
-                            library_id, folder_path = key
-                            to_trigger.append((library_id, folder_path))
+                            library_id, folder_path, _ = key
+                            to_trigger.append((library_id, folder_path, metadata))
                             del self.pending_scans[key]
 
                     # 2. Process Notifications that are ready
@@ -595,9 +646,9 @@ class PlexScanner:
                     logger.info(f"🔔 Sending notifications for {len(ready_notifications)} folders")
                     self._send_multi_grouped_notification(ready_notifications)
 
-                for library_id, folder_path in to_trigger:
+                for library_id, folder_path, metadata in to_trigger:
                     # Submit to monitor executor so we don't block the queue loop
-                    self.scan_monitor_executor.submit(self._do_trigger_scan, library_id, folder_path)
+                    self.scan_monitor_executor.submit(self._do_trigger_scan, library_id, folder_path, metadata=metadata)
             except Exception as e:
                 logger.error(f"Error in scan queue worker: {e}")
                 time.sleep(5)
@@ -742,7 +793,7 @@ class PlexScanner:
         embed.set_footer(text="Omniscan Media Monitor")
         self._send_discord_embed(embed)
 
-    def _do_trigger_scan(self, library_id, folder_path):
+    def _do_trigger_scan(self, library_id, folder_path, metadata=None):
         """Actually trigger a library scan for a specific folder and wait for completion."""
         TRIGGERED_SCANS_TOTAL.inc()
         if self.config.get('DRY_RUN'):
@@ -750,6 +801,10 @@ class PlexScanner:
             return
 
         server_type = self.config.get('SERVER_TYPE', 'plex')
+        
+        # Log the metadata if it exists
+        if metadata:
+            logger.info(f"🔎 Scanning with metadata: {metadata}")
         
         try:
             if server_type == 'plex':
@@ -838,6 +893,41 @@ class PlexScanner:
             return False
         return not os.path.exists(os.path.realpath(file_path))
 
+    def check_file_integrity(self, file_path):
+        """Check if file is valid (not 0-byte, and optionally passes ffprobe)."""
+        if not self.config.get('INTEGRITY_CHECK'):
+            return True, None
+
+        try:
+            if not os.path.exists(file_path):
+                return False, "file not found"
+            
+            # 1. 0-byte check
+            size = os.path.getsize(file_path)
+            if size == 0:
+                return False, "0-byte file"
+        except Exception as e:
+            return False, f"error reading size: {e}"
+
+        # 2. ffprobe check
+        if self.config.get('FFPROBE_CHECK'):
+            import subprocess
+            try:
+                cmd = ["ffprobe", "-v", "error", "-show_format", "-show_streams", file_path]
+                res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5)
+                if res.returncode != 0:
+                    err_msg = res.stderr.strip() if res.stderr else f"exit code {res.returncode}"
+                    return False, f"ffprobe error: {err_msg}"
+            except subprocess.TimeoutExpired:
+                return False, "ffprobe timeout"
+            except FileNotFoundError:
+                logger.warning("ffprobe command not found. Please ensure ffmpeg is installed.")
+                return True, None
+            except Exception as e:
+                return False, f"ffprobe exception: {str(e)}"
+
+        return True, None
+
     def submit_file_event(self, event_type, file_path):
         """Submit a file event for asynchronous processing."""
         if event_type == 'created' or event_type == 'moved':
@@ -873,7 +963,22 @@ class PlexScanner:
         if stats: stats.increment_scanned()
         SCANNED_FILES_TOTAL.inc()
 
+        # Only check library membership for video/audio files.
+        # Subtitle sidecar files (.srt/.sub/.ass/.vtt) are not indexed by
+        # Plex as individual items — skipping them prevents false stuck entries.
+        if file_ext not in self.config['LIBRARY_EXTENSIONS']:
+            return
+
         if not self.is_in_library(file_path):
+            is_valid, reason = self.check_file_integrity(file_path)
+            if not is_valid:
+                logger.warning(f"❌ File failed integrity validation ({reason}): {file_path}")
+                if tracker:
+                    tracker.add_event("Corrupt", file_path, reason)
+                if stats:
+                    stats.add_corrupt_item(file_path, reason)
+                return
+
             norm_path = os.path.normpath(file_path)
             with self.pending_files_lock:
                 if norm_path in self.pending_files:
@@ -888,10 +993,12 @@ class PlexScanner:
                 should_scan = True
                 if tracker:
                     if tracker.increment_attempt(file_path):
-                        stats.add_stuck_item(file_path)
+                        if stats:
+                            stats.add_stuck_item(file_path)
                         should_scan = False
                     else:
-                        stats.add_missing_item(library_title, file_path)
+                        if stats:
+                            stats.add_missing_item(library_title, file_path)
                 
                 if should_scan:
                     # Enqueue for notification
@@ -926,7 +1033,9 @@ class PlexScanner:
         # If the root of the scan is missing, the mount is likely down.
         scan_root = None
         for path in self.config['SCAN_PATHS']:
-             if file_path.startswith(path):
+             norm_p = os.path.normpath(path)
+             norm_f = os.path.normpath(file_path)
+             if norm_f == norm_p or norm_f.startswith(norm_p + os.sep):
                  scan_root = path
                  break
         
@@ -1026,7 +1135,19 @@ class PlexScanner:
                 stats.increment_scanned()
                 SCANNED_FILES_TOTAL.inc()
 
+                # Only check library membership for video/audio files.
+                # Subtitle sidecar files are not Plex library items.
+                if file_ext not in self.config['LIBRARY_EXTENSIONS']:
+                    continue
+
                 if not self.is_in_library(file_path):
+                    is_valid, reason = self.check_file_integrity(file_path)
+                    if not is_valid:
+                        logger.warning(f"❌ File failed integrity validation ({reason}): {file_path}")
+                        tracker.add_event("Corrupt", file_path, reason)
+                        stats.add_corrupt_item(file_path, reason)
+                        continue
+
                     if library_title:
                         if tracker.increment_attempt(file_path):
                             stats.add_stuck_item(file_path)
@@ -1113,8 +1234,20 @@ class PlexScanner:
                                     
                                     stats.increment_scanned()
                                     SCANNED_FILES_TOTAL.inc()
-                                    
+
+                                    # Only check library membership for video/audio files.
+                                    # Subtitle sidecar files are not Plex library items.
+                                    if file_ext not in self.config['LIBRARY_EXTENSIONS']:
+                                        continue
+
                                     if not self.is_in_library(file_path):
+                                        is_valid, reason = self.check_file_integrity(file_path)
+                                        if not is_valid:
+                                            logger.warning(f"❌ File failed integrity validation ({reason}): {file_path}")
+                                            tracker.add_event("Corrupt", file_path, reason)
+                                            stats.add_corrupt_item(file_path, reason)
+                                            continue
+
                                         if library_title:
                                             if tracker.increment_attempt(file_path):
                                                 stats.add_stuck_item(file_path)
@@ -1132,18 +1265,6 @@ class PlexScanner:
                 for future in futures:
                     future.result()
 
-            # Mass Deletion Safety Check
-            if self.config.get('ABORT_ON_MASS_DELETION') and stats.total_missing > self.config.get('DELETION_THRESHOLD', 50):
-                msg = f"🛑 MASS DELETION DETECTED: {stats.total_missing} items missing. Aborting scan to protect library metadata."
-                logger.error(msg)
-                self.send_single_notification(
-                    "🚨 Scan Aborted (Safety Trigger)",
-                    f"Mass deletion threshold exceeded (**{stats.total_missing}** items missing).\n"
-                    f"Threshold: **{self.config.get('DELETION_THRESHOLD')}** items.\n\n"
-                    "Please check your mounts/storage. No library updates were triggered.",
-                    Color.red()
-                )
-                return
 
             if stats.total_missing > 0:
                 stats.send_discord_pending(len(folders_to_scan))

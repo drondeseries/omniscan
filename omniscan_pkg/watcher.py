@@ -42,7 +42,7 @@ class PlexWatcher(FileSystemEventHandler):
             if lid:
                 self.scanner.trigger_scan(lid, parent)
 
-def start_watcher(scanner):
+def start_watcher(scanner, stop_event=None):
     """Start the watchdog observer."""
     use_polling = scanner.config.get('USE_POLLING', False)
     if use_polling:
@@ -68,17 +68,19 @@ def start_watcher(scanner):
 
     observer.start()
     
-    # Setup signal handling for graceful stop if running as main blocker
-    import signal
     import threading
-    stop_event = threading.Event()
+    if stop_event is None:
+        stop_event = threading.Event()
     
-    def signal_handler(signum, frame):
-        logger.info("🛑 Watcher stopping...")
-        stop_event.set()
+    # Setup signal handling for graceful stop if running in the main thread
+    if threading.current_thread() is threading.main_thread():
+        import signal
+        def signal_handler(signum, frame):
+            logger.info("🛑 Watcher stopping...")
+            stop_event.set()
 
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
 
     try:
         while not stop_event.is_set():

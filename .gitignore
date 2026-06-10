@@ -41,4 +41,5 @@ ENV/
 # Data
 *.db
 *.sqlite
-missing_files_history.json 
+missing_files_history.json conductor/
+conductor/
