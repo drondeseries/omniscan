@@ -94,11 +94,19 @@ def send_discord_webhook_sync(webhook_url, embed, config, max_retries=3, event_t
                 allowed_parse.append("everyone")
                 
             for u in config.get('DISCORD_MENTION_USERS', []):
-                content_parts.append(f"<@{u}>")
-                allowed_users.append(u)
+                u_str = str(u).strip()
+                if u_str.isdigit():
+                    content_parts.append(f"<@{u_str}>")
+                    allowed_users.append(u_str)
+                else:
+                    logger.warning(f"Skipping invalid non-numeric Discord user mention ID: '{u_str}'")
             for r in config.get('DISCORD_MENTION_ROLES', []):
-                content_parts.append(f"<@&{r}>")
-                allowed_roles.append(r)
+                r_str = str(r).strip()
+                if r_str.isdigit():
+                    content_parts.append(f"<@&{r_str}>")
+                    allowed_roles.append(r_str)
+                else:
+                    logger.warning(f"Skipping invalid non-numeric Discord role mention ID: '{r_str}'")
                 
             if content_parts:
                 payload["content"] = " ".join(content_parts)
