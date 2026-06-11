@@ -54,7 +54,7 @@ def start_watcher(scanner, stop_event=None):
         
     handler = PlexWatcher(scanner)
     
-    paths_to_watch = scanner.config['SCAN_PATHS']
+    paths_to_watch = scanner.config.get('WATCH_DIRECTORIES') or scanner.config['SCAN_PATHS']
     if not paths_to_watch:
         logger.warning("No paths configured to watch.")
         return

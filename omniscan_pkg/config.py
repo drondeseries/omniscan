@@ -49,6 +49,7 @@ def load_config(config_path='config.ini'):
     cfg['DISCORD_AVATAR_URL'] = "https://raw.githubusercontent.com/drondeseries/omniscan/master/assets/logo.png"
     cfg['DISCORD_WEBHOOK_NAME'] = "Omniscan"
     cfg['SYMLINK_CHECK'] = get_config_val(config, 'SYMLINK_CHECK', 'behaviour', 'symlink_check', 'false', lambda x: str(x).lower() == 'true')
+    cfg['EMPTY_TRASH'] = get_config_val(config, 'EMPTY_TRASH', 'behaviour', 'empty_trash', 'false', lambda x: str(x).lower() == 'true')
     cfg['NOTIFICATIONS_ENABLED'] = get_config_val(config, 'NOTIFICATIONS_ENABLED', 'notifications', 'enabled', 'true', lambda x: str(x).lower() == 'true')
     cfg['START_TIME'] = get_config_val(config, 'START_TIME', 'behaviour', 'start_time')
     cfg['RUN_ON_STARTUP'] = get_config_val(config, 'RUN_ON_STARTUP', 'behaviour', 'run_on_startup', 'true', lambda x: str(x).lower() == 'true')
@@ -76,6 +77,12 @@ def load_config(config_path='config.ini'):
     cfg['SCAN_PATHS'] = [path.strip() for path in directories_raw.replace('\n', ',').split(',') if path.strip()]
     if cfg['SCAN_PATHS']:
         cfg['SCAN_PATHS'].sort()
+
+    # Parse Watch Directories (folders to enable real-time watching on)
+    watch_dirs_raw = get_config_val(config, 'WATCH_DIRECTORIES', 'scan', 'watch_directories', '')
+    cfg['WATCH_DIRECTORIES'] = [path.strip() for path in watch_dirs_raw.replace('\n', ',').split(',') if path.strip()]
+    if cfg['WATCH_DIRECTORIES']:
+        cfg['WATCH_DIRECTORIES'].sort()
 
     # Parse Path Rewrites (from Autopulse features)
     rewrites_raw = get_config_val(config, 'PATH_REWRITES', 'rewrite', 'mappings', '')
@@ -135,4 +142,11 @@ def load_config(config_path='config.ini'):
     }
 
     return cfg
+
+def get_webhook_token(password):
+    import hashlib
+    if not password:
+        password = "admin"
+    return hashlib.sha256(f"omniscan-webhook-{password}".encode()).hexdigest()[:16]
+
 
