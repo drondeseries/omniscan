@@ -1066,7 +1066,7 @@ def init_ui(app, scanner):
             'server_url': c.get('SERVER_URL', ''),
             'api_key': mask_s(c.get('API_KEY', '')),
             'scan_directories': "\n".join(c.get('SCAN_PATHS', [])),
-            'watch_directories': "\n".join(c.get('WATCH_DIRECTORIES', [])),
+
             'scan_workers': c.get('SCAN_WORKERS', 4),
             'scan_debounce': c.get('SCAN_DEBOUNCE', 10),
             'scan_delay': c.get('SCAN_DELAY', 0.0),
@@ -1199,11 +1199,7 @@ def init_ui(app, scanner):
                     placeholder='/media/video/movies\n/media/video/tv'
                 ).classes('w-full font-mono').props('outlined rows=4')
 
-                watch_directories = ui.textarea(
-                    'Real-time Watch Directories (Optional)',
-                    value=values['watch_directories'],
-                    placeholder='/media/video/movies\n/media/video/tv\n\nLeave blank to watch all directories.'
-                ).classes('w-full font-mono').props('outlined rows=3')
+
 
                 async def verify_paths():
                     paths_raw = [p.strip() for p in scan_directories.value.replace(',', '\n').split('\n') if p.strip()]
@@ -1327,7 +1323,7 @@ def init_ui(app, scanner):
                     c['PLEX_URL'] = plex_url.value
                     c['TOKEN'] = unmasked_token
                     c['SCAN_PATHS'] = [p.strip() for p in scan_directories.value.replace(',', '\n').split('\n') if p.strip()]
-                    c['WATCH_DIRECTORIES'] = [p.strip() for p in watch_directories.value.replace(',', '\n').split('\n') if p.strip()]
+                    c['WATCH_DIRECTORIES'] = []
                     c['SCAN_WORKERS'] = int(scan_workers.value)
                     c['SCAN_DEBOUNCE'] = int(scan_debounce.value)
                     c['SCAN_DELAY'] = float(scan_delay.value)
@@ -1386,7 +1382,7 @@ def init_ui(app, scanner):
                         cfg.set('notifications', 'enabled', str(c['NOTIFICATIONS_ENABLED']).lower())
                         cfg.set('notifications', 'discord_webhook_url', str(c['DISCORD_WEBHOOK_URL']))
                         cfg.set('scan', 'directories', ','.join(c['SCAN_PATHS']))
-                        cfg.set('scan', 'watch_directories', ','.join(c['WATCH_DIRECTORIES']))
+                        cfg.set('scan', 'watch_directories', '')
                         cfg.set('ignore', 'patterns', ','.join(c['IGNORE_PATTERNS']))
                         cfg.set('logs', 'loglevel', str(c['LOG_LEVEL']))
                         cfg.set('rewrite', 'mappings', ','.join([f'{src}:{dst}' for src, dst in c['PATH_REWRITES']]))
