@@ -87,7 +87,7 @@ def main():
 
     # Stuck File Management
     if args.list_stuck:
-        tracker = StuckFileTracker()
+        tracker = StuckFileTracker(config=config)
         stuck_files = tracker.get_all_stuck()
         if not stuck_files:
             print("No stuck files found.")
@@ -98,7 +98,7 @@ def main():
         sys.exit(0)
 
     if args.clear_stuck:
-        tracker = StuckFileTracker()
+        tracker = StuckFileTracker(config=config)
         if tracker.clear_all_stuck():
             print("✅ Cleared all stuck files from history.")
         else:
@@ -126,7 +126,7 @@ def main():
             from .models import RunStats
             
             stats = RunStats(config)
-            tracker = StuckFileTracker()
+            tracker = StuckFileTracker(config=config)
             folders_to_scan = set()
             lock = threading.Lock()
             

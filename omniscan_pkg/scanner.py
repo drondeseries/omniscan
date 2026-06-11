@@ -50,6 +50,7 @@ class PlexScanner:
         self.library_sections_cache = []
         self.library_files = {} # Changed to dict for easier clearing
         self.library_counts = {} # Store last known counts when cache is invalidated
+        self.library_rating_keys = {} # Store mapping of file paths to rating keys
         self.path_library_cache = {}
         self.path_library_cache_lock = threading.Lock()
         self.library_missing_counts = {} # Store count of missing files per library
@@ -92,8 +93,14 @@ class PlexScanner:
         """Sequential worker for sending Discord notifications to avoid rate limits."""
         while True:
             try:
-                embed = self.notification_queue.get()
-                if send_discord_webhook_sync(self.config['DISCORD_WEBHOOK_URL'], embed, self.config):
+                queue_item = self.notification_queue.get()
+                if isinstance(queue_item, tuple):
+                    embed, event_type = queue_item
+                else:
+                    embed = queue_item
+                    event_type = None
+                
+                if send_discord_webhook_sync(self.config['DISCORD_WEBHOOK_URL'], embed, self.config, event_type=event_type):
                     logger.info(f"✅ Discord notification sent: {embed.title}")
                 else:
                     logger.error(f"❌ Failed to send Discord notification: {embed.title}")
@@ -105,18 +112,18 @@ class PlexScanner:
                 logger.error(f"Error in notification worker: {e}")
                 time.sleep(5)
 
-    def _send_discord_embed(self, embed):
+    def _send_discord_embed(self, embed, event_type=None):
         """Queue a constructed Embed for the notification worker."""
         if not self.config.get('NOTIFICATIONS_ENABLED', True) or not self.config.get('DISCORD_WEBHOOK_URL'):
             return
         
-        self.notification_queue.put(embed)
+        self.notification_queue.put((embed, event_type))
 
-    def send_single_notification(self, title, description, color):
+    def send_single_notification(self, title, description, color, event_type=None):
         """Send a single-event notification to Discord."""
         embed = Embed(title=title, description=description, color=color, timestamp=datetime.now())
         embed.set_footer(text="Omniscan Media Monitor")
-        self._send_discord_embed(embed)
+        self._send_discord_embed(embed, event_type=event_type)
 
     def connect_to_plex(self, retry=True):
         """Connect to Plex. If retry=True, loops until connected. If False, raises error on failure."""
@@ -306,6 +313,7 @@ class PlexScanner:
             batch_size = 10000
             start = 0
             new_files = set()
+            new_rating_keys = {}
             count = 0
             
             endpoint = "/allLeaves" if section.type in ['show', 'artist'] else "/all"
@@ -331,11 +339,15 @@ class PlexScanner:
                     break
                 
                 for item in items:
+                    rating_key = item.get('ratingKey')
                     for media in item.get('Media', []):
                         for part in media.get('Part', []):
                             file_path = part.get('file')
                             if file_path:
-                                new_files.add(os.path.normpath(file_path))
+                                norm_p = os.path.normpath(file_path)
+                                new_files.add(norm_p)
+                                if rating_key:
+                                    new_rating_keys[norm_p] = rating_key
                                 count += 1
                 
                 batch_count = len(items)
@@ -351,9 +363,10 @@ class PlexScanner:
             with self.library_files_lock:
                 self.library_files[library_id] = new_files
                 self.library_counts[library_id] = len(new_files)
+                self.library_rating_keys[library_id] = new_rating_keys
 
             cache_time = time.time() - cache_start
-            logger.info(f"💾 Cache initialized for library {BOLD}{section.title}{RESET}: {BOLD}{count}{RESET} files in {BOLD}{cache_time:.2f}{RESET} seconds")
+            logger.info(f"💾 Cache initialized for library {BOLD}{section.title}{RESET}: {BOLD}{len(new_files)}{RESET} files in {BOLD}{cache_time:.2f}{RESET} seconds")
         except Exception as e:
             logger.error(f"Error caching library {library_id}: {str(e)}")
             if isinstance(e, requests.RequestException):
@@ -539,6 +552,7 @@ class PlexScanner:
         """Cache Jellyfin/Emby library using pagination to save memory."""
         try:
             new_files = set()
+            new_rating_keys = {}
             batch_size = 5000
             start_index = 0
             
@@ -555,8 +569,13 @@ class PlexScanner:
                     break
                     
                 for item in items:
-                    if 'Path' in item:
-                        new_files.add(item['Path'])
+                    path = item.get('Path')
+                    item_id = item.get('Id')
+                    if path:
+                        norm_p = os.path.normpath(path)
+                        new_files.add(norm_p)
+                        if item_id:
+                            new_rating_keys[norm_p] = item_id
                 
                 batch_count = len(items)
                 total_count = data.get('TotalRecordCount', 0)
@@ -573,6 +592,7 @@ class PlexScanner:
             with self.library_files_lock:
                 self.library_files[library_id] = new_files
                 self.library_counts[library_id] = len(new_files)
+                self.library_rating_keys[library_id] = new_rating_keys
             
             logger.info(f"💾 Cached {len(new_files)} items for {self.config['SERVER_TYPE']} library {library_id}")
         except Exception as e:
@@ -831,7 +851,7 @@ class PlexScanner:
             embed.add_field(name="...", value=f"and {len(notifications) - 20} more folders", inline=False)
 
         embed.set_footer(text="Omniscan Media Monitor")
-        self._send_discord_embed(embed)
+        self._send_discord_embed(embed, event_type='update')
 
     def _send_grouped_notification(self, entity_root, data):
         """Send a single Discord notification for multiple file events."""
@@ -902,7 +922,7 @@ class PlexScanner:
             )
 
         embed.set_footer(text="Omniscan Media Monitor")
-        self._send_discord_embed(embed)
+        self._send_discord_embed(embed, event_type='update')
 
     def _do_trigger_scan(self, library_id, folder_path, metadata=None):
         """Actually trigger a library scan for a specific folder and wait for completion."""
@@ -925,6 +945,17 @@ class PlexScanner:
                 self._trigger_plex_scan(library_id, folder_path, metadata=metadata)
             elif server_type in ['jellyfin', 'emby']:
                 self._trigger_jellyfin_emby_scan(library_id, folder_path)
+                
+                # For Jellyfin/Emby, queue the post scan processing with a delay
+                added_files = []
+                if folder_path in self.pending_notifications:
+                    added_files = self.pending_notifications[folder_path].get('added', [])
+                if not added_files and metadata and metadata.get('event_type') == 'added':
+                    added_files = [folder_path]
+                    
+                if added_files:
+                    for fpath in added_files:
+                        self.scan_monitor_executor.submit(self._post_scan_process_file_delayed, fpath, delay=10)
         finally:
             # Clear cache for this library so it's re-indexed on next check
             # This is critical to ensure that even if the scan took time or had minor issues,
@@ -1017,6 +1048,17 @@ class PlexScanner:
                     if not is_scanning:
                         logger.info(f"✅ Plex scan finished for: {folder_path}")
                         
+                        # Trigger metadata refresh/analysis on newly added files
+                        added_files = []
+                        if folder_path in self.pending_notifications:
+                            added_files = self.pending_notifications[folder_path].get('added', [])
+                        if not added_files and metadata and metadata.get('event_type') == 'added':
+                            added_files = [folder_path]
+                            
+                        if added_files:
+                            for fpath in added_files:
+                                self.scan_monitor_executor.submit(self._post_scan_process_file, fpath)
+
                         # Empty trash if deletion event and empty_trash behaviour is enabled
                         is_deletion = metadata and metadata.get('event_type') == 'deleted'
                         if is_deletion and self.config.get('EMPTY_TRASH'):
@@ -1048,6 +1090,131 @@ class PlexScanner:
             logger.error(f"Failed to trigger Plex scan for {folder_path}: {e}")
             if isinstance(e, requests.RequestException):
                 self.plex = None
+    def get_plex_rating_key(self, file_path, library_id=None):
+        """Query Plex API directly to get the rating key for a file path."""
+        if not self.plex: return None
+        try:
+            if not library_id:
+                library_id, _, _ = self.get_library_id_for_path(file_path)
+            if not library_id: return None
+            
+            section = self.plex.library.sectionByID(int(library_id))
+            
+            if section.type == 'show':
+                libtype = 'episode'
+            elif section.type == 'artist':
+                libtype = 'track'
+            else:
+                libtype = 'movie'
+                
+            filename = os.path.basename(file_path)
+            results = section.search(title=filename, libtype=libtype)
+            
+            norm_target = os.path.normpath(file_path)
+            for item in results:
+                if hasattr(item, 'media'):
+                    for media in item.media:
+                        for part in media.parts:
+                            if os.path.normpath(part.file) == norm_target:
+                                return item.ratingKey
+            return None
+        except Exception as e:
+            logger.error(f"Error getting Plex rating key for {file_path}: {e}")
+            return None
+
+    def analyze_and_refresh_item(self, rating_key):
+        """Trigger analysis and refresh on Plex for a specific rating key."""
+        if not self.plex or not rating_key: return
+        
+        token = self.plex._token
+        baseurl = self.plex._baseurl
+        
+        if self.config.get('PLEX_ANALYZE'):
+            try:
+                analyze_url = f"{baseurl}/library/metadata/{rating_key}/analyze?X-Plex-Token={token}"
+                res = self.plex._session.put(analyze_url)
+                res.raise_for_status()
+                logger.info(f"⚡ Plex metadata analysis triggered for ratingKey: {rating_key}")
+            except Exception as e:
+                logger.error(f"Failed to trigger Plex analysis for ratingKey {rating_key}: {e}")
+                
+        if self.config.get('PLEX_REFRESH'):
+            try:
+                refresh_url = f"{baseurl}/library/metadata/{rating_key}/refresh?X-Plex-Token={token}"
+                res = self.plex._session.put(refresh_url)
+                res.raise_for_status()
+                logger.info(f"⚡ Plex metadata refresh triggered for ratingKey: {rating_key}")
+            except Exception as e:
+                logger.error(f"Failed to trigger Plex refresh for ratingKey {rating_key}: {e}")
+
+    def get_jellyfin_item_id(self, file_path):
+        """Query Jellyfin/Emby API directly to get the item ID for a file path."""
+        url = f"{self.config['SERVER_URL']}/Items"
+        headers = {"X-Emby-Token": self.config['API_KEY'], "Accept": "application/json"}
+        params = {"Path": file_path, "Fields": "Path"}
+        try:
+            res = self.http_session.get(url, headers=headers, params=params)
+            res.raise_for_status()
+            data = res.json()
+            items = data.get('Items', [])
+            if items:
+                return items[0].get('Id')
+            return None
+        except Exception as e:
+            logger.error(f"Error getting Jellyfin/Emby item ID for {file_path}: {e}")
+            return None
+
+    def refresh_jellyfin_item(self, item_id):
+        """Trigger metadata refresh on Jellyfin/Emby for a specific item ID."""
+        if not item_id: return
+        url = f"{self.config['SERVER_URL']}/Items/{item_id}/Refresh"
+        headers = {"X-Emby-Token": self.config['API_KEY']}
+        params = {
+            "MetadataRefreshMode": "FullRefresh",
+            "ImageRefreshMode": "FullRefresh",
+            "ReplaceAllImages": "false",
+            "ReplaceAllMetadata": "false"
+        }
+        try:
+            res = self.http_session.post(url, headers=headers, params=params)
+            res.raise_for_status()
+            logger.info(f"⚡ Jellyfin/Emby metadata refresh triggered for item ID: {item_id}")
+        except Exception as e:
+            logger.error(f"Failed to trigger Jellyfin/Emby refresh for item ID {item_id}: {e}")
+
+    def _post_scan_process_file(self, file_path):
+        """Perform post-scan actions (metadata refresh, analysis) for a scanned file."""
+        server_type = self.config.get('SERVER_TYPE', 'plex')
+        
+        # Wait a small moment to ensure Plex/Jellyfin database transactions have settled
+        time.sleep(2)
+        
+        if server_type == 'plex':
+            # Check if analyze or refresh is enabled
+            if not self.config.get('PLEX_ANALYZE') and not self.config.get('PLEX_REFRESH'):
+                return
+                
+            rating_key = self.get_plex_rating_key(file_path)
+            if rating_key:
+                self.analyze_and_refresh_item(rating_key)
+            else:
+                logger.debug(f"Could not find Plex ratingKey for newly scanned file: {file_path}")
+                
+        elif server_type in ['jellyfin', 'emby']:
+            if not self.config.get('PLEX_REFRESH'):
+                # Treat PLEX_REFRESH as generic refresh config
+                return
+                
+            item_id = self.get_jellyfin_item_id(file_path)
+            if item_id:
+                self.refresh_jellyfin_item(item_id)
+            else:
+                logger.debug(f"Could not find Jellyfin/Emby item ID for newly scanned file: {file_path}")
+
+    def _post_scan_process_file_delayed(self, file_path, delay=10):
+        """Perform post-scan actions after a delayed sleep."""
+        time.sleep(delay)
+        self._post_scan_process_file(file_path)
 
     def is_broken_symlink(self, file_path):
         if not os.path.islink(file_path):
@@ -1342,11 +1509,12 @@ class PlexScanner:
         self.is_scanning = True
         try:
             stats = RunStats(self.config)
-            tracker = StuckFileTracker()
+            tracker = StuckFileTracker(config=self.config)
             
             # Use lock when clearing and re-filling cache
             with self.library_files_lock:
                 self.library_files.clear()
+                self.library_rating_keys.clear()
             with self.path_library_cache_lock:
                 self.path_library_cache.clear()
             logger.info("Cache cleared for new scan")
@@ -1468,6 +1636,7 @@ class PlexScanner:
             if not self.config.get('WATCH_MODE'):
                 with self.library_files_lock:
                     self.library_files.clear()
+                    self.library_rating_keys.clear()
                     self.library_missing_counts.clear()
                     self.library_missing_files.clear()
                 with self.path_library_cache_lock:
@@ -1483,7 +1652,7 @@ class PlexScanner:
         def do_scan():
             from .models import RunStats, StuckFileTracker
             stats = RunStats(self.config)
-            tracker = StuckFileTracker()
+            tracker = StuckFileTracker(config=self.config)
             folders_to_scan = set()
             folders_to_scan_lock = threading.Lock()
             

@@ -48,6 +48,12 @@ def load_config(config_path='config.ini'):
     cfg['DISCORD_WEBHOOK_URL'] = get_config_val(config, 'DISCORD_WEBHOOK_URL', 'notifications', 'discord_webhook_url')
     cfg['DISCORD_AVATAR_URL'] = "https://raw.githubusercontent.com/drondeseries/omniscan/master/assets/logo.png"
     cfg['DISCORD_WEBHOOK_NAME'] = "Omniscan"
+    cfg['DISCORD_MENTION_USERS'] = [u.strip() for u in get_config_val(config, 'DISCORD_MENTION_USERS', 'notifications', 'mention_users', '').split(',') if u.strip()]
+    cfg['DISCORD_MENTION_ROLES'] = [r.strip() for r in get_config_val(config, 'DISCORD_MENTION_ROLES', 'notifications', 'mention_roles', '').split(',') if r.strip()]
+    cfg['DISCORD_MENTION_EVERYONE'] = get_config_val(config, 'DISCORD_MENTION_EVERYONE', 'notifications', 'mention_everyone', 'false', lambda x: str(x).lower() == 'true')
+    cfg['DISCORD_MENTION_HERE'] = get_config_val(config, 'DISCORD_MENTION_HERE', 'notifications', 'mention_here', 'false', lambda x: str(x).lower() == 'true')
+    cfg['DISCORD_MENTION_EVENTS'] = [e.strip().lower() for e in get_config_val(config, 'DISCORD_MENTION_EVENTS', 'notifications', 'mention_events', 'corrupt,stuck').split(',') if e.strip()]
+    
     cfg['SYMLINK_CHECK'] = get_config_val(config, 'SYMLINK_CHECK', 'behaviour', 'symlink_check', 'false', lambda x: str(x).lower() == 'true')
     cfg['EMPTY_TRASH'] = get_config_val(config, 'EMPTY_TRASH', 'behaviour', 'empty_trash', 'false', lambda x: str(x).lower() == 'true')
     cfg['NOTIFICATIONS_ENABLED'] = get_config_val(config, 'NOTIFICATIONS_ENABLED', 'notifications', 'enabled', 'true', lambda x: str(x).lower() == 'true')
@@ -59,6 +65,9 @@ def load_config(config_path='config.ini'):
     cfg['NOTIFICATION_GROUP_WINDOW'] = get_config_val(config, 'NOTIFICATION_GROUP_WINDOW', 'behaviour', 'notification_group_window', 15, int)
     cfg['USE_POLLING'] = get_config_val(config, 'USE_POLLING', 'behaviour', 'use_polling', 'false', lambda x: str(x).lower() == 'true')
     cfg['WATCH_MODE'] = get_config_val(config, 'WATCH_MODE', 'behaviour', 'watch', 'false', lambda x: str(x).lower() == 'true')
+    cfg['CLEANUP_DAYS'] = get_config_val(config, 'CLEANUP_DAYS', 'behaviour', 'cleanup_days', 10, int)
+    cfg['PLEX_ANALYZE'] = get_config_val(config, 'PLEX_ANALYZE', 'behaviour', 'plex_analyze', 'false', lambda x: str(x).lower() == 'true')
+    cfg['PLEX_REFRESH'] = get_config_val(config, 'PLEX_REFRESH', 'behaviour', 'plex_refresh', 'false', lambda x: str(x).lower() == 'true')
     
     # New Features
     cfg['INCREMENTAL_SCAN'] = get_config_val(config, 'INCREMENTAL_SCAN', 'behaviour', 'incremental_scan', 'false', lambda x: str(x).lower() == 'true')

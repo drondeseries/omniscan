@@ -48,7 +48,7 @@ def get_embed_length(embed):
         length += len(field.name) + len(field.value)
     return length
 
-def send_discord_webhook_sync(webhook_url, embed, config, max_retries=3):
+def send_discord_webhook_sync(webhook_url, embed, config, max_retries=3, event_type=None):
     """Send a Discord webhook message synchronously using requests.
     
     Handles Discord rate limiting (429) by respecting the retry_after value
@@ -71,6 +71,42 @@ def send_discord_webhook_sync(webhook_url, embed, config, max_retries=3):
         avatar_url = config.get('DISCORD_AVATAR_URL')
         if avatar_url:
             payload["avatar_url"] = avatar_url
+
+        # Check if we should mention users/roles for this event_type
+        mention_events = config.get('DISCORD_MENTION_EVENTS', [])
+        is_mention_triggered = False
+        if event_type:
+            event_type_lower = str(event_type).lower()
+            if 'all' in mention_events or event_type_lower in mention_events:
+                is_mention_triggered = True
+        
+        if is_mention_triggered:
+            content_parts = []
+            allowed_users = []
+            allowed_roles = []
+            allowed_parse = []
+            
+            if config.get('DISCORD_MENTION_EVERYONE'):
+                content_parts.append("@everyone")
+                allowed_parse.append("everyone")
+            if config.get('DISCORD_MENTION_HERE'):
+                content_parts.append("@here")
+                allowed_parse.append("everyone")
+                
+            for u in config.get('DISCORD_MENTION_USERS', []):
+                content_parts.append(f"<@{u}>")
+                allowed_users.append(u)
+            for r in config.get('DISCORD_MENTION_ROLES', []):
+                content_parts.append(f"<@&{r}>")
+                allowed_roles.append(r)
+                
+            if content_parts:
+                payload["content"] = " ".join(content_parts)
+                payload["allowed_mentions"] = {
+                    "parse": allowed_parse,
+                    "users": allowed_users,
+                    "roles": allowed_roles
+                }
 
         # Ensure individual field limits are respected before sending
         if embed.title:
@@ -113,33 +149,50 @@ def send_discord_webhook_sync(webhook_url, embed, config, max_retries=3):
             payload["embeds"].append(embed.to_dict())
 
         for attempt in range(1, max_retries + 1):
-            response = requests.post(webhook_url, json=payload, timeout=10)
+            try:
+                response = requests.post(webhook_url, json=payload, timeout=10)
 
-            if response.status_code == 429:
-                # Discord rate limit — parse retry_after from the response body
-                try:
-                    retry_after = response.json().get("retry_after", 5.0)
-                except Exception:
-                    retry_after = 5.0
+                if response.status_code == 429:
+                    # Discord rate limit — parse retry_after from the response body
+                    try:
+                        retry_after = response.json().get("retry_after", 5.0)
+                    except Exception:
+                        retry_after = 5.0
 
-                retry_after = float(retry_after)
+                    retry_after = float(retry_after)
+                    if attempt < max_retries:
+                        logger.warning(
+                            f"Discord webhook rate limited (429). "
+                            f"Retrying in {retry_after:.1f}s (attempt {attempt}/{max_retries})…"
+                        )
+                        time.sleep(retry_after)
+                        continue
+                    else:
+                        logger.error(
+                            f"Discord webhook rate limited (429) after {max_retries} attempts. "
+                            f"Giving up on: {embed.title}"
+                        )
+                        return False
+
+                response.raise_for_status()
+                return True
+
+            except requests.exceptions.RequestException as e:
                 if attempt < max_retries:
+                    backoff = 2 ** attempt
                     logger.warning(
-                        f"Discord webhook rate limited (429). "
-                        f"Retrying in {retry_after:.1f}s (attempt {attempt}/{max_retries})…"
+                        f"Network error sending Discord webhook: {str(e)}. "
+                        f"Retrying in {backoff}s (attempt {attempt}/{max_retries})…"
                     )
-                    time.sleep(retry_after)
+                    time.sleep(backoff)
                     continue
                 else:
                     logger.error(
-                        f"Discord webhook rate limited (429) after {max_retries} attempts. "
-                        f"Giving up on: {embed.title}"
+                        f"Failed to send sync webhook after {max_retries} attempts: {str(e)}"
                     )
                     return False
-
-            response.raise_for_status()
-            return True
 
     except Exception as e:
         logger.error(f"Failed to send sync webhook: {str(e)}")
         return False
+

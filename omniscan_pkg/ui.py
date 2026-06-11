@@ -1088,7 +1088,15 @@ def init_ui(app, scanner):
             'notification_group_window': c.get('NOTIFICATION_GROUP_WINDOW', 15),
             'ignore_patterns': "\n".join(c.get('IGNORE_PATTERNS', [])),
             'log_level': c.get('LOG_LEVEL', 'INFO'),
-            'path_rewrites': "\n".join([f"{src}:{dst}" for src, dst in c.get('PATH_REWRITES', [])])
+            'path_rewrites': "\n".join([f"{src}:{dst}" for src, dst in c.get('PATH_REWRITES', [])]),
+            'cleanup_days': c.get('CLEANUP_DAYS', 10),
+            'plex_analyze': c.get('PLEX_ANALYZE', False),
+            'plex_refresh': c.get('PLEX_REFRESH', False),
+            'mention_users': ",".join(c.get('DISCORD_MENTION_USERS', [])),
+            'mention_roles': ",".join(c.get('DISCORD_MENTION_ROLES', [])),
+            'mention_everyone': c.get('DISCORD_MENTION_EVERYONE', False),
+            'mention_here': c.get('DISCORD_MENTION_HERE', False),
+            'mention_events': ",".join(c.get('DISCORD_MENTION_EVENTS', ['corrupt', 'stuck']))
         }
 
         def section_header(title, icon, subtitle=None):
@@ -1255,9 +1263,12 @@ def init_ui(app, scanner):
                     incremental_scan = ui.switch('Incremental Scan', value=values['incremental_scan'])
                     symlink_check = ui.switch('Symlink Check', value=values['symlink_check'])
                     empty_trash = ui.switch('Empty Trash on Deletion', value=values['empty_trash'])
+                    plex_analyze = ui.switch('Trigger Media Analysis', value=values['plex_analyze'])
+                    plex_refresh = ui.switch('Trigger Metadata Refresh', value=values['plex_refresh'])
 
                 with ui.row().classes('w-full gap-4 flex-wrap items-center'):
                     scan_since_days = ui.number('Incremental Window (days)', value=values['scan_since_days']).classes('grow').props('outlined dense')
+                    cleanup_days = ui.number('History Cleanup Window (days)', value=values['cleanup_days']).classes('grow').props('outlined dense')
 
                 ui.separator().classes('opacity-5')
 
@@ -1294,6 +1305,17 @@ def init_ui(app, scanner):
                         notification_group_window = ui.number(
                             value=values['notification_group_window'], min=5, max=300
                         ).classes('w-32').props('outlined dense suffix=s')
+
+                ui.separator().classes('opacity-5')
+                ui.label('Discord Mentions & Pings').classes('text-[10px] font-black text-slate-500 uppercase tracking-widest')
+                with ui.row().classes('w-full gap-4 flex-wrap'):
+                    mention_everyone = ui.switch('Mention @everyone', value=values['mention_everyone'])
+                    mention_here = ui.switch('Mention @here', value=values['mention_here'])
+
+                with ui.row().classes('w-full gap-4 flex-wrap items-center'):
+                    mention_users = ui.input('Users to Mention (IDs, comma-separated)', value=values['mention_users']).classes('grow').props('outlined dense')
+                    mention_roles = ui.input('Roles to Mention (IDs, comma-separated)', value=values['mention_roles']).classes('grow').props('outlined dense')
+                    mention_events = ui.input('Events to Mention On (comma-separated, e.g. corrupt,stuck)', value=values['mention_events']).classes('grow').props('outlined dense')
 
                 async def test_webhook_btn():
                     ui.notify('Sending test notification...', type='info')
@@ -1362,6 +1384,15 @@ def init_ui(app, scanner):
                     c['IGNORE_PATTERNS'] = [p.strip() for p in ignore_patterns.value.replace(',', '\n').split('\n') if p.strip()]
                     c['LOG_LEVEL'] = log_level.value
 
+                    c['CLEANUP_DAYS'] = int(cleanup_days.value)
+                    c['PLEX_ANALYZE'] = plex_analyze.value
+                    c['PLEX_REFRESH'] = plex_refresh.value
+                    c['DISCORD_MENTION_USERS'] = [u.strip() for u in mention_users.value.split(',') if u.strip()]
+                    c['DISCORD_MENTION_ROLES'] = [r.strip() for r in mention_roles.value.split(',') if r.strip()]
+                    c['DISCORD_MENTION_EVERYONE'] = mention_everyone.value
+                    c['DISCORD_MENTION_HERE'] = mention_here.value
+                    c['DISCORD_MENTION_EVENTS'] = [e.strip().lower() for e in mention_events.value.split(',') if e.strip()]
+
                     c['PATH_REWRITES'] = []
                     for line in path_rewrites.value.replace(',', '\n').split('\n'):
                         line = line.strip()
@@ -1399,6 +1430,15 @@ def init_ui(app, scanner):
                         cfg.set('notifications', 'enabled', str(c['NOTIFICATIONS_ENABLED']).lower())
                         cfg.set('notifications', 'discord_webhook_url', str(c['DISCORD_WEBHOOK_URL']))
                         cfg.set('behaviour', 'notification_group_window', str(c['NOTIFICATION_GROUP_WINDOW']))
+
+                        cfg.set('behaviour', 'cleanup_days', str(c['CLEANUP_DAYS']))
+                        cfg.set('behaviour', 'plex_analyze', str(c['PLEX_ANALYZE']).lower())
+                        cfg.set('behaviour', 'plex_refresh', str(c['PLEX_REFRESH']).lower())
+                        cfg.set('notifications', 'mention_users', ','.join(c['DISCORD_MENTION_USERS']))
+                        cfg.set('notifications', 'mention_roles', ','.join(c['DISCORD_MENTION_ROLES']))
+                        cfg.set('notifications', 'mention_everyone', str(c['DISCORD_MENTION_EVERYONE']).lower())
+                        cfg.set('notifications', 'mention_here', str(c['DISCORD_MENTION_HERE']).lower())
+                        cfg.set('notifications', 'mention_events', ','.join(c['DISCORD_MENTION_EVENTS']))
                         cfg.set('scan', 'directories', ','.join(c['SCAN_PATHS']))
                         cfg.set('scan', 'watch_directories', '')
                         cfg.set('ignore', 'patterns', ','.join(c['IGNORE_PATTERNS']))

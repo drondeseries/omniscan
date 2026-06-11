@@ -12,8 +12,9 @@ from discord import Embed, Color
 logger = logging.getLogger(__name__)
 
 class StuckFileTracker:
-    def __init__(self, db_file='history.db'):
+    def __init__(self, db_file='history.db', config=None):
         self.db_file = db_file
+        self.config = config or {}
         self.max_retries = 3
         self.lock = threading.Lock()
         self.stuck_paths = set()
@@ -67,10 +68,12 @@ class StuckFileTracker:
                     with conn:
                         conn.execute('INSERT INTO events (timestamp, event_type, details, status, metadata) VALUES (?, ?, ?, ?, ?)', (timestamp, event_type, details, status, metadata_json))
 
-                        # Prune old events periodically (every 100 inserts) to reduce overhead
+                        # Prune old events and stuck files older than cleanup_days
                         self.prune_counter += 1
                         if self.prune_counter >= 100:
-                            conn.execute('DELETE FROM events WHERE id NOT IN (SELECT id FROM events ORDER BY id DESC LIMIT 1000)')
+                            cleanup_days = self.config.get('CLEANUP_DAYS', 10) if hasattr(self, 'config') else 10
+                            conn.execute("DELETE FROM events WHERE timestamp < datetime('now', ?)", (f"-{cleanup_days} days",))
+                            conn.execute("DELETE FROM stuck_files WHERE last_seen < datetime('now', ?)", (f"-{cleanup_days} days",))
                             self.prune_counter = 0
             except Exception as e:
                 logger.error(f"DB Error adding event: {e}")
@@ -322,8 +325,15 @@ class RunStats:
             # Add footer
             embed.set_footer(text=f"Omniscan Media Monitor • Run Time: {self.get_run_time()}")
 
+            # Determine event_type for Discord mentions
+            event_type = 'update'
+            if self.stuck_items:
+                event_type = 'stuck'
+            if self.corrupt_items:
+                event_type = 'corrupt'
+
             # Send webhook
-            if send_discord_webhook_sync(webhook_url, embed, self.config):
+            if send_discord_webhook_sync(webhook_url, embed, self.config, event_type=event_type):
                 logger.info("✅ Discord notification sent successfully")
 
         except Exception as e:
