@@ -362,11 +362,11 @@ class PlexScanner:
 
             with self.library_files_lock:
                 self.library_files[library_id] = new_files
-                self.library_counts[library_id] = len(new_files)
+                self.library_counts[library_id] = count
                 self.library_rating_keys[library_id] = new_rating_keys
 
             cache_time = time.time() - cache_start
-            logger.info(f"💾 Cache initialized for library {BOLD}{section.title}{RESET}: {BOLD}{len(new_files)}{RESET} files in {BOLD}{cache_time:.2f}{RESET} seconds")
+            logger.info(f"💾 Cache initialized for library {BOLD}{section.title}{RESET}: {BOLD}{count}{RESET} files in {BOLD}{cache_time:.2f}{RESET} seconds")
         except Exception as e:
             logger.error(f"Error caching library {library_id}: {str(e)}")
             if isinstance(e, requests.RequestException):
@@ -555,6 +555,7 @@ class PlexScanner:
             new_rating_keys = {}
             batch_size = 5000
             start_index = 0
+            count = 0
             
             while True:
                 # Fetch items in batches using StartIndex and Limit
@@ -576,6 +577,7 @@ class PlexScanner:
                         new_files.add(norm_p)
                         if item_id:
                             new_rating_keys[norm_p] = item_id
+                        count += 1
                 
                 batch_count = len(items)
                 total_count = data.get('TotalRecordCount', 0)
@@ -591,10 +593,10 @@ class PlexScanner:
             
             with self.library_files_lock:
                 self.library_files[library_id] = new_files
-                self.library_counts[library_id] = len(new_files)
+                self.library_counts[library_id] = count
                 self.library_rating_keys[library_id] = new_rating_keys
             
-            logger.info(f"💾 Cached {len(new_files)} items for {self.config['SERVER_TYPE']} library {library_id}")
+            logger.info(f"💾 Cached {count} items for {self.config['SERVER_TYPE']} library {library_id}")
         except Exception as e:
             logger.error(f"Failed to cache {self.config['SERVER_TYPE']} library: {e}")
 
