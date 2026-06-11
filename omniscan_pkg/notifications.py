@@ -174,6 +174,8 @@ def send_discord_webhook_sync(webhook_url, embed, config, max_retries=3, event_t
                         )
                         return False
 
+                if response.status_code >= 400:
+                    logger.error(f"Discord webhook failed with status {response.status_code}: {response.text}")
                 response.raise_for_status()
                 return True
 
