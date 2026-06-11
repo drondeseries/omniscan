@@ -162,6 +162,24 @@ recent_logs = deque(maxlen=100)
 # Regex to strip ANSI/VT100 escape sequences (e.g. \x1b[1m, [0m, [33m etc.)
 _ANSI_RE = re.compile(r'(?:\x1b|\x9b)\[[\d;]*[A-Za-z]|\[\d+m')
 
+# Patterns for sensitive data that must never appear in the UI log viewer
+_SENSITIVE_PATTERNS = [
+    # Discord webhook URLs: redact the token segment after /webhooks/<id>/
+    (re.compile(r'(discord\.com/api/webhooks/\d+/)([\w\-]+)'), r'\1[REDACTED]'),
+    # Generic URL query params: apikey=, api_key=, token=, password=, secret=
+    (re.compile(r'(?i)((?:apikey|api_key|token|password|secret|auth)=)[^&\s"]+'), r'\1[REDACTED]'),
+    # Plex token in URL: X-Plex-Token=<value>
+    (re.compile(r'(?i)(X-Plex-Token=)[^&\s"]+'), r'\1[REDACTED]'),
+    # Bearer / token header values
+    (re.compile(r'(?i)(Bearer\s+)[\w\-\.]+'), r'\1[REDACTED]'),
+]
+
+def _sanitize_log(line: str) -> str:
+    """Redact sensitive values (tokens, keys, webhook secrets) from a log line."""
+    for pattern, replacement in _SENSITIVE_PATTERNS:
+        line = pattern.sub(replacement, line)
+    return line
+
 class ConnectionManager:
     def __init__(self):
         self.active_connections: List[WebSocket] = []
@@ -183,7 +201,7 @@ manager = ConnectionManager()
 class WebSocketLogHandler(logging.Handler):
     def emit(self, record):
         try:
-            log_entry = _ANSI_RE.sub('', self.format(record))
+            log_entry = _sanitize_log(_ANSI_RE.sub('', self.format(record)))
             recent_logs.append(log_entry)
             
             global main_loop
