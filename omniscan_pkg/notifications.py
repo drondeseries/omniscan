@@ -1,5 +1,6 @@
 import logging
 import os
+import time
 import requests
 import json
 from datetime import datetime
@@ -47,8 +48,12 @@ def get_embed_length(embed):
         length += len(field.name) + len(field.value)
     return length
 
-def send_discord_webhook_sync(webhook_url, embed, config):
-    """Send a Discord webhook message synchronously using requests."""
+def send_discord_webhook_sync(webhook_url, embed, config, max_retries=3):
+    """Send a Discord webhook message synchronously using requests.
+    
+    Handles Discord rate limiting (429) by respecting the retry_after value
+    returned in the response body, with up to max_retries attempts.
+    """
     if not webhook_url or not str(webhook_url).startswith("http"):
         return False
         
@@ -107,9 +112,34 @@ def send_discord_webhook_sync(webhook_url, embed, config):
         else:
             payload["embeds"].append(embed.to_dict())
 
-        response = requests.post(webhook_url, json=payload, timeout=10)
-        response.raise_for_status()
-        return True
+        for attempt in range(1, max_retries + 1):
+            response = requests.post(webhook_url, json=payload, timeout=10)
+
+            if response.status_code == 429:
+                # Discord rate limit — parse retry_after from the response body
+                try:
+                    retry_after = response.json().get("retry_after", 5.0)
+                except Exception:
+                    retry_after = 5.0
+
+                retry_after = float(retry_after)
+                if attempt < max_retries:
+                    logger.warning(
+                        f"Discord webhook rate limited (429). "
+                        f"Retrying in {retry_after:.1f}s (attempt {attempt}/{max_retries})…"
+                    )
+                    time.sleep(retry_after)
+                    continue
+                else:
+                    logger.error(
+                        f"Discord webhook rate limited (429) after {max_retries} attempts. "
+                        f"Giving up on: {embed.title}"
+                    )
+                    return False
+
+            response.raise_for_status()
+            return True
+
     except Exception as e:
         logger.error(f"Failed to send sync webhook: {str(e)}")
         return False

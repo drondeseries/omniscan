@@ -3,6 +3,7 @@ import time
 import logging
 import json
 import asyncio
+import re
 import pathlib
 import requests
 import secrets
@@ -121,6 +122,7 @@ class SettingsUpdate(BaseModel):
     abort_on_mass_deletion: bool
     notifications_enabled: bool
     discord_webhook_url: str
+    notification_group_window: int = 15
     ignore_patterns: str
     log_level: str
     path_rewrites: str
@@ -157,6 +159,9 @@ def verify_credentials(username, password):
 
 recent_logs = deque(maxlen=100)
 
+# Regex to strip ANSI/VT100 escape sequences (e.g. \x1b[1m, [0m, [33m etc.)
+_ANSI_RE = re.compile(r'(?:\x1b|\x9b)\[[\d;]*[A-Za-z]|\[\d+m')
+
 class ConnectionManager:
     def __init__(self):
         self.active_connections: List[WebSocket] = []
@@ -178,7 +183,7 @@ manager = ConnectionManager()
 class WebSocketLogHandler(logging.Handler):
     def emit(self, record):
         try:
-            log_entry = self.format(record)
+            log_entry = _ANSI_RE.sub('', self.format(record))
             recent_logs.append(log_entry)
             
             global main_loop
@@ -353,6 +358,7 @@ async def get_stats(u: str = Depends(get_current_user)):
             "abort_on_mass_deletion": cfg.get('ABORT_ON_MASS_DELETION'),
             "notifications_enabled": cfg.get('NOTIFICATIONS_ENABLED'),
             "discord_webhook_url": mask_s(cfg.get('DISCORD_WEBHOOK_URL')),
+            "notification_group_window": cfg.get('NOTIFICATION_GROUP_WINDOW', 15),
             "ignore_patterns": "\n".join(cfg.get('IGNORE_PATTERNS', [])),
             "log_level": cfg.get('LOG_LEVEL'),
             "path_rewrites": "\n".join([f"{src}:{dst}" for src, dst in cfg.get('PATH_REWRITES', [])]),
@@ -490,6 +496,7 @@ async def update_settings(s: SettingsUpdate, u: str = Depends(get_current_user))
     c['ABORT_ON_MASS_DELETION'] = s.abort_on_mass_deletion
     c['NOTIFICATIONS_ENABLED'] = s.notifications_enabled
     c['DISCORD_WEBHOOK_URL'] = unmask_v(s.discord_webhook_url, c.get('DISCORD_WEBHOOK_URL', ''))
+    c['NOTIFICATION_GROUP_WINDOW'] = s.notification_group_window
     c['IGNORE_PATTERNS'] = [p.strip() for p in s.ignore_patterns.replace(',', '\n').split('\n') if p.strip()]
     c['LOG_LEVEL'] = s.log_level
     
@@ -529,6 +536,7 @@ async def update_settings(s: SettingsUpdate, u: str = Depends(get_current_user))
         cfg.set('behaviour', 'abort_on_mass_deletion', str(c['ABORT_ON_MASS_DELETION']).lower())
         cfg.set('notifications', 'enabled', str(c['NOTIFICATIONS_ENABLED']).lower())
         cfg.set('notifications', 'discord_webhook_url', str(c['DISCORD_WEBHOOK_URL']))
+        cfg.set('behaviour', 'notification_group_window', str(c['NOTIFICATION_GROUP_WINDOW']))
         cfg.set('ignore', 'patterns', ",".join(c['IGNORE_PATTERNS']))
         cfg.set('logs', 'loglevel', str(c['LOG_LEVEL']))
         cfg.set('rewrite', 'mappings', ",".join([f"{src}:{dst}" for src, dst in c['PATH_REWRITES']]))

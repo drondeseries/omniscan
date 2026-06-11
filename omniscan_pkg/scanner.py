@@ -60,6 +60,9 @@ class PlexScanner:
         self.pending_scans = {}
         self.pending_scans_lock = threading.Lock()
         self.pending_notifications = defaultdict(lambda: {'added': [], 'deleted': [], 'library_title': ''})
+        # Buffer for grouping ready notifications before flushing to Discord
+        self.notify_buffer = []          # list of (path, data) waiting to be sent
+        self.notify_buffer_since = None  # time.time() when the first item was buffered
         self.is_scanning = False # Track if a full scan is currently running
         self.pending_files = set() # Track files currently queued for scan to prevent duplicates
         self.pending_files_lock = threading.Lock()
@@ -95,8 +98,8 @@ class PlexScanner:
                 else:
                     logger.error(f"❌ Failed to send Discord notification: {embed.title}")
                 
-                # Small delay between notifications to be safe
-                time.sleep(1)
+                # Respect Discord's global rate limit: 30 messages per 60s = 1 per 2s minimum
+                time.sleep(2)
                 self.notification_queue.task_done()
             except Exception as e:
                 logger.error(f"Error in notification worker: {e}")
@@ -727,10 +730,20 @@ class PlexScanner:
                                 for f in notif_data['added'] + notif_data['deleted']:
                                     self.pending_files.discard(os.path.normpath(f))
                 
-                # Send a single grouped notification for all ready folders
+                # Accumulate ready notifications into the buffer, then flush once the
+                # group window expires — this collapses burst events into one message.
                 if ready_notifications:
-                    logger.info(f"🔔 Sending notifications for {len(ready_notifications)} folders")
-                    self._send_multi_grouped_notification(ready_notifications)
+                    self.notify_buffer.extend(ready_notifications)
+                    if self.notify_buffer_since is None:
+                        self.notify_buffer_since = time.time()
+
+                group_window = self.config.get('NOTIFICATION_GROUP_WINDOW', 15)
+                if self.notify_buffer and self.notify_buffer_since is not None:
+                    if time.time() - self.notify_buffer_since >= group_window:
+                        logger.info(f"🔔 Flushing {len(self.notify_buffer)} grouped notification(s) to Discord")
+                        self._send_multi_grouped_notification(self.notify_buffer)
+                        self.notify_buffer = []
+                        self.notify_buffer_since = None
 
                 for library_id, folder_path, metadata in to_trigger:
                     # Submit to monitor executor so we don't block the queue loop

@@ -1085,6 +1085,7 @@ def init_ui(app, scanner):
             'abort_on_mass_deletion': c.get('ABORT_ON_MASS_DELETION', True),
             'notifications_enabled': c.get('NOTIFICATIONS_ENABLED', True),
             'discord_webhook_url': mask_s(c.get('DISCORD_WEBHOOK_URL', '')),
+            'notification_group_window': c.get('NOTIFICATION_GROUP_WINDOW', 15),
             'ignore_patterns': "\n".join(c.get('IGNORE_PATTERNS', [])),
             'log_level': c.get('LOG_LEVEL', 'INFO'),
             'path_rewrites': "\n".join([f"{src}:{dst}" for src, dst in c.get('PATH_REWRITES', [])])
@@ -1274,10 +1275,25 @@ def init_ui(app, scanner):
                 section_header('Discord Notifications', 'fa-bell', 'Get notified on scan events via Discord webhook')
 
                 notifications_enabled = ui.switch('Enable Notifications', value=values['notifications_enabled'])
-                discord_webhook_url = ui.input(
-                    'Discord Webhook URL',
-                    value=values['discord_webhook_url']
-                ).classes('w-full').props('outlined type=password')
+
+                with ui.row().classes('w-full gap-4 flex-wrap items-end'):
+                    discord_webhook_url = ui.input(
+                        'Discord Webhook URL',
+                        value=values['discord_webhook_url']
+                    ).classes('grow').props('outlined type=password')
+                    with ui.column().classes('gap-1'):
+                        with ui.row().classes('items-center gap-1'):
+                            ui.label('Group Window (s)').classes('text-xs text-slate-400')
+                            with ui.element('span'):
+                                ui.tooltip(
+                                    'Events are buffered for this many seconds before being '
+                                    'flushed as a single Discord message. Increase to reduce '
+                                    'message count during busy scans (default: 15).'
+                                ).classes('text-xs max-w-xs')
+                                ui.html('<i class="fas fa-circle-info text-slate-500 text-xs cursor-help"></i>')
+                        notification_group_window = ui.number(
+                            value=values['notification_group_window'], min=5, max=300
+                        ).classes('w-32').props('outlined dense suffix=s')
 
                 async def test_webhook_btn():
                     ui.notify('Sending test notification...', type='info')
@@ -1342,6 +1358,7 @@ def init_ui(app, scanner):
                     c['ABORT_ON_MASS_DELETION'] = abort_on_mass_deletion.value
                     c['NOTIFICATIONS_ENABLED'] = notifications_enabled.value
                     c['DISCORD_WEBHOOK_URL'] = unmasked_webhook
+                    c['NOTIFICATION_GROUP_WINDOW'] = int(notification_group_window.value)
                     c['IGNORE_PATTERNS'] = [p.strip() for p in ignore_patterns.value.replace(',', '\n').split('\n') if p.strip()]
                     c['LOG_LEVEL'] = log_level.value
 
@@ -1381,6 +1398,7 @@ def init_ui(app, scanner):
                         cfg.set('behaviour', 'abort_on_mass_deletion', str(c['ABORT_ON_MASS_DELETION']).lower())
                         cfg.set('notifications', 'enabled', str(c['NOTIFICATIONS_ENABLED']).lower())
                         cfg.set('notifications', 'discord_webhook_url', str(c['DISCORD_WEBHOOK_URL']))
+                        cfg.set('behaviour', 'notification_group_window', str(c['NOTIFICATION_GROUP_WINDOW']))
                         cfg.set('scan', 'directories', ','.join(c['SCAN_PATHS']))
                         cfg.set('scan', 'watch_directories', '')
                         cfg.set('ignore', 'patterns', ','.join(c['IGNORE_PATTERNS']))
