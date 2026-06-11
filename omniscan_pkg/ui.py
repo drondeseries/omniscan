@@ -335,7 +335,7 @@ def create_card(title, value, color='text-white', icon='', link=None):
             ui.label(title).classes('text-slate-400 text-[10px] font-black uppercase tracking-widest')
             if icon:
                 ui.html(f'<i class="fas {icon} text-slate-500 text-sm"></i>')
-        ui.label(value).classes(f'text-3xl font-extrabold {color}')
+        return ui.label(value).classes(f'text-3xl font-extrabold {color}')
 
 def create_connection_banner(scanner):
     c = scanner.config
@@ -384,16 +384,16 @@ def init_ui(app, scanner):
                 create_card('Watching Paths', watched_paths_count, 'text-cyan-400', 'fa-folder-tree')
                 
                 active_queue_count = str(len(scanner.pending_scans))
-                create_card('Active Queue', active_queue_count, 'text-amber-400', 'fa-hourglass-half')
+                queue_card_lbl = create_card('Active Queue', active_queue_count, 'text-amber-400', 'fa-hourglass-half')
                 
                 corrupt_count = str(scanner.history.get_corrupt_count())
-                create_card('Corrupt Media', corrupt_count, 'text-rose-400', 'fa-triangle-exclamation')
+                corrupt_card_lbl = create_card('Corrupt Media', corrupt_count, 'text-rose-400', 'fa-triangle-exclamation')
                 
                 missing_count = str(sum(scanner.library_missing_counts.values()))
-                create_card('Missing Files', missing_count, 'text-yellow-400', 'fa-magnifying-glass-minus', link='/browser?show=missing')
+                missing_card_lbl = create_card('Missing Files', missing_count, 'text-yellow-400', 'fa-magnifying-glass-minus', link='/browser?show=missing')
 
                 stuck_count = str(scanner.history.get_truly_stuck_count())
-                create_card('Stuck Files', stuck_count, 'text-rose-400', 'fa-circle-exclamation', link='/browser?show=stuck')
+                stuck_card_lbl = create_card('Stuck Files', stuck_count, 'text-rose-400', 'fa-circle-exclamation', link='/browser?show=stuck')
 
             # Scanner Control & Active queue
             with ui.row().classes('w-full gap-6 flex-wrap mb-8 items-stretch'):
@@ -453,6 +453,57 @@ def init_ui(app, scanner):
                     ui.markdown(
                         "Add this URL to **Sonarr/Radarr** -> **Settings** -> **Connect** -> **Webhook** (using POST method on import) to trigger instant scans."
                     ).classes('text-[11px] text-slate-400 leading-relaxed')
+
+                # Pending Scans Card
+                with ui.card().classes('glass-card p-6 rounded-2xl grow min-w-[300px] flex flex-col gap-4'):
+                    ui.label('Pending Scans').classes('text-sm font-bold text-cyan-400 uppercase tracking-wider')
+                    pending_container = ui.column().classes('w-full gap-2 grow')
+
+            def refresh_dashboard_stats():
+                try:
+                    with scanner.pending_scans_lock:
+                        pending_items = list(scanner.pending_scans.items())
+                    queue_card_lbl.text = str(len(pending_items))
+                    corrupt_card_lbl.text = str(scanner.history.get_corrupt_count())
+                    missing_card_lbl.text = str(sum(scanner.library_missing_counts.values()))
+                    stuck_card_lbl.text = str(scanner.history.get_truly_stuck_count())
+                    status_lbl.text = 'Scanner Status: ' + ('SCANNING...' if scanner.is_scanning else 'IDLE')
+                    
+                    pending_container.clear()
+                    if not pending_items:
+                        with pending_container:
+                            ui.label('No scans pending').classes('text-xs text-slate-500 italic py-2')
+                        return
+                        
+                    import time
+                    now = time.time()
+                    debounce = scanner.config.get('SCAN_DEBOUNCE', 10)
+                    pending_items.sort(key=lambda x: x[1][0])
+                    
+                    with pending_container:
+                        for (lid, path, _), (lt, metadata) in pending_items[:5]:
+                            name = metadata.get('name') if metadata else os.path.basename(path)
+                            rem = max(0, int(debounce - (now - lt)))
+                            
+                            with ui.row().classes('w-full items-center justify-between bg-slate-950/40 p-2 rounded-xl border border-white/5 gap-2'):
+                                with ui.column().classes('gap-0 grow overflow-hidden'):
+                                    ui.label(name).classes('text-xs font-semibold text-slate-200 truncate').tooltip(path)
+                                    ui.label(f'Triggering in {rem}s').classes('text-[10px] text-amber-400')
+                                
+                                async def trigger_now(lib_id=lid, folder_path=path):
+                                    scanner.trigger_scan(lib_id, folder_path, force=True)
+                                    ui.notify(f'Force scanning: {os.path.basename(folder_path)}', type='info')
+                                    refresh_dashboard_stats()
+                                    
+                                ui.button(icon='play_arrow', on_click=trigger_now).props('flat round dense').classes('text-cyan-400 hover:text-white').tooltip('Scan Now')
+                                
+                        if len(pending_items) > 5:
+                            ui.label(f'+ {len(pending_items) - 5} more pending...').classes('text-[10px] text-slate-500 self-center')
+                except Exception:
+                    pass
+
+            refresh_dashboard_stats()
+            auto_cancel(ui.timer(1.0, refresh_dashboard_stats))
 
 
 
