@@ -946,7 +946,7 @@ class PlexScanner:
             if server_type == 'plex':
                 self._trigger_plex_scan(library_id, folder_path, metadata=metadata)
             elif server_type in ['jellyfin', 'emby']:
-                self._trigger_jellyfin_emby_scan(library_id, folder_path)
+                self._trigger_jellyfin_emby_scan(library_id, folder_path, metadata=metadata)
                 
                 # For Jellyfin/Emby, queue the post scan processing with a delay
                 added_files = []
@@ -976,22 +976,37 @@ class PlexScanner:
                     logger.debug(f"🧹 Invalidating cache (int) for library {lib_id_int} after scan")
                     del self.library_files[lib_id_int]
 
-    def _trigger_jellyfin_emby_scan(self, library_id, folder_path):
+    def _trigger_jellyfin_emby_scan(self, library_id, folder_path, metadata=None):
         """Trigger a scan for Jellyfin or Emby (they share similar path-based scan APIs)."""
         url = f"{self.config['SERVER_URL']}/Library/Media/Updated"
         headers = {
             "X-Emby-Token": self.config['API_KEY'],
             "Content-Type": "application/json"
         }
+        
+        # Determine the update type (default to "Created" for safety)
+        update_type = "Created"
+        if metadata:
+            event_type = metadata.get('event_type')
+            if event_type == 'deleted':
+                update_type = "Deleted"
+            elif event_type in ['created', 'added', 'moved']:
+                update_type = "Created"
+            elif event_type == 'modified':
+                update_type = "Modified"
+                
         # Jellyfin/Emby usually take a list of paths to check
         payload = {
-            "Updates": [{"Path": folder_path}]
+            "Updates": [{
+                "Path": folder_path,
+                "UpdateType": update_type
+            }]
         }
         
         try:
             response = self.http_session.post(url, json=payload, headers=headers)
             response.raise_for_status()
-            logger.info(f"🔎 {self.config['SERVER_TYPE'].capitalize()} scan triggered for: {BOLD}{folder_path}{RESET}")
+            logger.info(f"🔎 {self.config['SERVER_TYPE'].capitalize()} scan triggered for: {BOLD}{folder_path}{RESET} (UpdateType: {update_type})")
             self.history.add_event("Scan Triggered", folder_path, self.config['SERVER_TYPE'])
         except Exception as e:
             logger.error(f"Failed to trigger {self.config['SERVER_TYPE']} scan: {e}")
