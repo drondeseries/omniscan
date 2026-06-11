@@ -109,7 +109,6 @@ class SettingsUpdate(BaseModel):
     scan_workers: int
     scan_debounce: int
     scan_delay: float
-    use_polling: bool
     watch_mode: bool
     run_interval: int
     run_on_startup: bool
@@ -363,7 +362,6 @@ async def get_stats(u: str = Depends(get_current_user)):
             "scan_workers": cfg.get('SCAN_WORKERS'),
             "scan_debounce": cfg.get('SCAN_DEBOUNCE'),
             "scan_delay": cfg.get('SCAN_DELAY'),
-            "use_polling": cfg.get('USE_POLLING'),
             "watch_mode": cfg.get('WATCH_MODE'),
             "run_interval": cfg.get('RUN_INTERVAL'),
             "run_on_startup": cfg.get('RUN_ON_STARTUP'),
@@ -499,7 +497,6 @@ async def update_settings(s: SettingsUpdate, u: str = Depends(get_current_user))
     c['SCAN_WORKERS'] = s.scan_workers
     c['SCAN_DEBOUNCE'] = s.scan_debounce
     c['SCAN_DELAY'] = s.scan_delay
-    c['USE_POLLING'] = s.use_polling
     c['WATCH_MODE'] = s.watch_mode
     c['RUN_INTERVAL'] = s.run_interval
     c['RUN_ON_STARTUP'] = s.run_on_startup
@@ -539,7 +536,6 @@ async def update_settings(s: SettingsUpdate, u: str = Depends(get_current_user))
         cfg.set('behaviour', 'scan_workers', str(c['SCAN_WORKERS']))
         cfg.set('behaviour', 'scan_debounce', str(c['SCAN_DEBOUNCE']))
         cfg.set('behaviour', 'scan_delay', str(c['SCAN_DELAY']))
-        cfg.set('behaviour', 'use_polling', str(c['USE_POLLING']).lower())
         cfg.set('behaviour', 'watch', str(c['WATCH_MODE']).lower())
         cfg.set('behaviour', 'run_interval', str(c['RUN_INTERVAL']))
         cfg.set('behaviour', 'run_on_startup', str(c['RUN_ON_STARTUP']).lower())

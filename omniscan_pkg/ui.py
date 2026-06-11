@@ -1070,7 +1070,6 @@ def init_ui(app, scanner):
             'scan_workers': c.get('SCAN_WORKERS', 4),
             'scan_debounce': c.get('SCAN_DEBOUNCE', 10),
             'scan_delay': c.get('SCAN_DELAY', 0.0),
-            'use_polling': c.get('USE_POLLING', False),
             'watch_mode': c.get('WATCH_MODE', False),
             'run_interval': c.get('RUN_INTERVAL', 24),
             'run_on_startup': c.get('RUN_ON_STARTUP', True),
@@ -1258,7 +1257,6 @@ def init_ui(app, scanner):
                 ui.label('Scan Modes').classes('text-[10px] font-black text-slate-500 uppercase tracking-widest')
                 with ui.grid(columns=3).classes('w-full gap-4'):
                     watch_mode = ui.switch('Watch Mode', value=values['watch_mode'])
-                    use_polling = ui.switch('Use Polling Observer', value=values['use_polling'])
                     run_on_startup = ui.switch('Run Scan on Startup', value=values['run_on_startup'])
                     incremental_scan = ui.switch('Incremental Scan', value=values['incremental_scan'])
                     symlink_check = ui.switch('Symlink Check', value=values['symlink_check'])
@@ -1365,7 +1363,6 @@ def init_ui(app, scanner):
                     c['SCAN_WORKERS'] = int(scan_workers.value)
                     c['SCAN_DEBOUNCE'] = int(scan_debounce.value)
                     c['SCAN_DELAY'] = float(scan_delay.value)
-                    c['USE_POLLING'] = use_polling.value
                     c['WATCH_MODE'] = watch_mode.value
                     c['RUN_INTERVAL'] = int(run_interval.value)
                     c['RUN_ON_STARTUP'] = run_on_startup.value
@@ -1414,7 +1411,6 @@ def init_ui(app, scanner):
                         cfg.set('behaviour', 'scan_workers', str(c['SCAN_WORKERS']))
                         cfg.set('behaviour', 'scan_debounce', str(c['SCAN_DEBOUNCE']))
                         cfg.set('behaviour', 'scan_delay', str(c['SCAN_DELAY']))
-                        cfg.set('behaviour', 'use_polling', str(c['USE_POLLING']).lower())
                         cfg.set('behaviour', 'watch', str(c['WATCH_MODE']).lower())
                         cfg.set('behaviour', 'run_interval', str(c['RUN_INTERVAL']))
                         cfg.set('behaviour', 'run_on_startup', str(c['RUN_ON_STARTUP']).lower())

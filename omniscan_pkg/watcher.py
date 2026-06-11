@@ -2,7 +2,6 @@ import time
 import os
 import logging
 from watchdog.observers import Observer
-from watchdog.observers.polling import PollingObserver
 from watchdog.events import FileSystemEventHandler
 
 logger = logging.getLogger(__name__)
@@ -44,13 +43,8 @@ class PlexWatcher(FileSystemEventHandler):
 
 def start_watcher(scanner, stop_event=None):
     """Start the watchdog observer."""
-    use_polling = scanner.config.get('USE_POLLING', False)
-    if use_polling:
-        logger.info("Using PollingObserver (CPU intensive, but better for network mounts)")
-        observer = PollingObserver()
-    else:
-        logger.info("Using Native Observer (Inotify)")
-        observer = Observer()
+    logger.info("Using Native Observer (Inotify)")
+    observer = Observer()
         
     handler = PlexWatcher(scanner)
     

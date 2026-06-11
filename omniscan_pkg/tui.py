@@ -45,7 +45,6 @@ SETTINGS_KEYS = [
     ("integrity_check", "Zero-byte Check (true/false)"),
     ("ffprobe_check", "Media ffprobe Check (true/false)"),
     ("watch_mode", "Real-time Watcher (true/false)"),
-    ("use_polling", "Use Polling Observer (true/false)"),
     ("discord_webhook_url", "Discord Webhook URL"),
     ("notifications_enabled", "Enable Notifications (true/false)"),
     ("ignore_patterns", "Ignore Patterns"),

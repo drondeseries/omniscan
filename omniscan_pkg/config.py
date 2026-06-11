@@ -63,7 +63,6 @@ def load_config(config_path='config.ini'):
     cfg['SCAN_WORKERS'] = get_config_val(config, 'SCAN_WORKERS', 'behaviour', 'scan_workers', 4, int)
     cfg['SCAN_DEBOUNCE'] = get_config_val(config, 'SCAN_DEBOUNCE', 'behaviour', 'scan_debounce', 30, int)
     cfg['NOTIFICATION_GROUP_WINDOW'] = get_config_val(config, 'NOTIFICATION_GROUP_WINDOW', 'behaviour', 'notification_group_window', 15, int)
-    cfg['USE_POLLING'] = get_config_val(config, 'USE_POLLING', 'behaviour', 'use_polling', 'false', lambda x: str(x).lower() == 'true')
     cfg['WATCH_MODE'] = get_config_val(config, 'WATCH_MODE', 'behaviour', 'watch', 'false', lambda x: str(x).lower() == 'true')
     cfg['CLEANUP_DAYS'] = get_config_val(config, 'CLEANUP_DAYS', 'behaviour', 'cleanup_days', 10, int)
     cfg['PLEX_ANALYZE'] = get_config_val(config, 'PLEX_ANALYZE', 'behaviour', 'plex_analyze', 'false', lambda x: str(x).lower() == 'true')
