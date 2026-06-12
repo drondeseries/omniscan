@@ -946,18 +946,19 @@ class PlexScanner:
             if server_type == 'plex':
                 self._trigger_plex_scan(library_id, folder_path, metadata=metadata)
             elif server_type in ['jellyfin', 'emby']:
-                self._trigger_jellyfin_emby_scan(library_id, folder_path, metadata=metadata)
+                plugin_scan_success = self._trigger_jellyfin_emby_scan(library_id, folder_path, metadata=metadata)
                 
-                # For Jellyfin/Emby, queue the post scan processing with a delay
-                added_files = []
-                if folder_path in self.pending_notifications:
-                    added_files = self.pending_notifications[folder_path].get('added', [])
-                if not added_files and metadata and metadata.get('event_type') == 'added':
-                    added_files = [folder_path]
-                    
-                if added_files:
-                    for fpath in added_files:
-                        self.scan_monitor_executor.submit(self._post_scan_process_file_delayed, fpath, delay=10)
+                # Only queue delayed post-scan processing if we fell back to the standard scan
+                if not plugin_scan_success:
+                    added_files = []
+                    if folder_path in self.pending_notifications:
+                        added_files = self.pending_notifications[folder_path].get('added', [])
+                    if not added_files and metadata and metadata.get('event_type') == 'added':
+                        added_files = [folder_path]
+                        
+                    if added_files:
+                        for fpath in added_files:
+                            self.scan_monitor_executor.submit(self._post_scan_process_file_delayed, fpath, delay=10)
         finally:
             # Clear cache for this library so it's re-indexed on next check
             # This is critical to ensure that even if the scan took time or had minor issues,
@@ -977,7 +978,40 @@ class PlexScanner:
                     del self.library_files[lib_id_int]
 
     def _trigger_jellyfin_emby_scan(self, library_id, folder_path, metadata=None):
-        """Trigger a scan for Jellyfin or Emby (they share similar path-based scan APIs)."""
+        """Tiered trigger: try ScanPath first, fallback to Media/Updated. Returns True if plugin scan succeeded."""
+        if self._try_plugin_scan(folder_path, metadata):
+            return True
+        
+        # Fallback to standard behavior
+        self._fallback_trigger_scan(folder_path, metadata)
+        return False
+
+    def _try_plugin_scan(self, folder_path, metadata):
+        """Try to use the Targeted Scan plugin (ScanPath)."""
+        url = f"{self.config['SERVER_URL']}/Library/ScanPath"
+        headers = {
+            "X-Emby-Token": self.config['API_KEY'],
+            "Content-Type": "application/json"
+        }
+        payload = {"Path": folder_path}
+        
+        try:
+            response = self.http_session.post(url, json=payload, headers=headers)
+            response.raise_for_status()
+            data = response.json()
+            
+            item_id = data.get('ItemId')
+            if item_id:
+                logger.info(f"🔎 Targeted plugin scan successful for: {BOLD}{folder_path}{RESET} (ItemId: {item_id})")
+                # Immediately trigger refresh to bypass sleep
+                self.refresh_jellyfin_item(item_id)
+                return True
+        except Exception as e:
+            logger.debug(f"Targeted plugin scan failed, falling back: {e}")
+        return False
+
+    def _fallback_trigger_scan(self, folder_path, metadata=None):
+        """Fallback to standard Jellyfin/Emby scan endpoint."""
         url = f"{self.config['SERVER_URL']}/Library/Media/Updated"
         headers = {
             "X-Emby-Token": self.config['API_KEY'],
@@ -1006,10 +1040,10 @@ class PlexScanner:
         try:
             response = self.http_session.post(url, json=payload, headers=headers)
             response.raise_for_status()
-            logger.info(f"🔎 {self.config['SERVER_TYPE'].capitalize()} scan triggered for: {BOLD}{folder_path}{RESET} (UpdateType: {update_type})")
-            self.history.add_event("Scan Triggered", folder_path, self.config['SERVER_TYPE'])
+            logger.info(f"🔎 {self.config['SERVER_TYPE'].capitalize()} fallback scan triggered for: {BOLD}{folder_path}{RESET} (UpdateType: {update_type})")
+            self.history.add_event("Scan Triggered (Fallback)", folder_path, self.config['SERVER_TYPE'])
         except Exception as e:
-            logger.error(f"Failed to trigger {self.config['SERVER_TYPE']} scan: {e}")
+            logger.error(f"Failed to trigger {self.config['SERVER_TYPE']} fallback scan: {e}")
 
     def _trigger_plex_scan(self, library_id, folder_path, metadata=None):
         if not self.plex:
