@@ -68,6 +68,11 @@ class PlexScanner:
         self.pending_files = set() # Track files currently queued for scan to prevent duplicates
         self.pending_files_lock = threading.Lock()
         
+        # Caching for Plex activities to prevent API spam
+        self._activities_cache = None
+        self._activities_cache_time = 0
+        self._activities_lock = threading.Lock()
+        
         # Persistent session for connection pooling
         self.http_session = requests.Session()
         self.http_session.headers.update({
@@ -311,33 +316,27 @@ class PlexScanner:
             cache_start = time.time()
             
             batch_size = 10000
-            start = 0
-            new_files = set()
-            new_rating_keys = {}
-            count = 0
-            
             endpoint = "/allLeaves" if section.type in ['show', 'artist'] else "/all"
+            url = f"{self.plex._baseurl}/library/sections/{library_id}{endpoint}"
+            headers = {
+                "Accept": "application/json",
+                "X-Plex-Token": self.plex._token
+            }
             
-            while True:
-                url = f"{self.plex._baseurl}/library/sections/{library_id}{endpoint}"
+            def fetch_batch(start_offset):
                 params = {
-                    "X-Plex-Container-Start": start,
+                    "X-Plex-Container-Start": start_offset,
                     "X-Plex-Container-Size": batch_size
-                }
-                headers = {
-                    "Accept": "application/json",
-                    "X-Plex-Token": self.plex._token
                 }
                 res = self.plex._session.get(url, params=params, headers=headers)
                 res.raise_for_status()
                 data = res.json()
-                
                 container = data.get('MediaContainer', {})
                 items = container.get('Metadata', [])
                 
-                if not items:
-                    break
-                
+                b_files = {}
+                b_keys = {}
+                b_count = 0
                 for item in items:
                     rating_key = item.get('ratingKey')
                     for media in item.get('Media', []):
@@ -345,20 +344,34 @@ class PlexScanner:
                             file_path = part.get('file')
                             if file_path:
                                 norm_p = os.path.normpath(file_path)
-                                new_files.add(norm_p)
+                                b_files[norm_p] = part.get('size', 0)
                                 if rating_key:
-                                    new_rating_keys[norm_p] = rating_key
-                                count += 1
-                
-                batch_count = len(items)
-                start += batch_count
-                
-                del data
-                del items
-                gc.collect()
-                
-                if batch_count < batch_size:
-                    break
+                                    b_keys[norm_p] = rating_key
+                                b_count += 1
+                return b_files, b_keys, b_count, container.get('totalSize', container.get('size', 0))
+
+            new_files = {}
+            new_rating_keys = {}
+            count = 0
+            
+            # Fetch first batch to get totalSize
+            b_files, b_keys, b_count, total_size = fetch_batch(0)
+            new_files.update(b_files)
+            new_rating_keys.update(b_keys)
+            count += b_count
+            
+            if total_size > batch_size:
+                offsets = list(range(batch_size, total_size, batch_size))
+                with ThreadPoolExecutor(max_workers=5) as executor:
+                    futures = [executor.submit(fetch_batch, offset) for offset in offsets]
+                    for future in futures:
+                        try:
+                            bf, bk, bc, _ = future.result()
+                            new_files.update(bf)
+                            new_rating_keys.update(bk)
+                            count += bc
+                        except Exception as e:
+                            logger.error(f"Error fetching cache batch: {e}")
 
             with self.library_files_lock:
                 self.library_files[library_id] = new_files
@@ -456,9 +469,24 @@ class PlexScanner:
             norm_path = os.path.normpath(file_path)
             
             # Lock-free fast path check (safe for concurrent reads under GIL)
-            files_set = self.library_files.get(library_id)
-            if files_set is not None:
-                return norm_path in files_set
+            files_collection = self.library_files.get(library_id)
+            if files_collection is not None:
+                if norm_path not in files_collection:
+                    return False
+                
+                # Check for in-place upgrades
+                if isinstance(files_collection, dict):
+                    cached_size = files_collection.get(norm_path)
+                    if cached_size is not None and cached_size > 0:
+                        try:
+                            current_size = os.path.getsize(file_path)
+                            if current_size > 0 and current_size != cached_size:
+                                logger.info(f"🔄 In-place upgrade detected: {BOLD}{file_path}{RESET} ({cached_size} -> {current_size} bytes)")
+                                return False
+                        except Exception:
+                            pass
+                            
+                return True
             
             # Ensure cache is loaded
             with self.library_files_lock:
@@ -680,7 +708,10 @@ class PlexScanner:
                 if pid == library_id:
                     # Case 1: A parent/ancestor of the new folder is already pending scan.
                     if folder_path.startswith(ppath + os.sep) or ppath == folder_path:
-                        logger.debug(f"⏳ Skipping specific scan for {folder_path} as broad parent {ppath} is already pending")
+                        logger.debug(f"⏳ Updating debounce for pending scan {ppath} due to activity in {folder_path}")
+                        # Update the parent's debounce timer so we wait for the LATEST file
+                        old_time, old_metadata = self.pending_scans[(pid, ppath, _)]
+                        self.pending_scans[(pid, ppath, _)] = (time.time(), metadata or old_metadata)
                         return
 
                     # Case 2: The new folder is a parent/ancestor of an already pending scan.
@@ -723,6 +754,16 @@ class PlexScanner:
                     for key, (last_time, metadata) in list(self.pending_scans.items()):
                         if now - last_time >= debounce_delay:
                             library_id, folder_path, _ = key
+                            
+                            # Mass Deletion Protection for individual file deletions
+                            if self.config.get('ABORT_ON_MASS_DELETION'):
+                                threshold = self.config.get('DELETION_THRESHOLD', 50)
+                                del_count = len(self.pending_notifications.get(folder_path, {}).get('deleted', []))
+                                if del_count > threshold:
+                                    logger.error(f"🛑 ABORTING SCAN: {del_count} individual files deleted in '{folder_path}' (Threshold: {threshold}).")
+                                    del self.pending_scans[key]
+                                    continue
+                                    
                             to_trigger.append((library_id, folder_path, metadata))
                             del self.pending_scans[key]
 
@@ -1045,6 +1086,35 @@ class PlexScanner:
         except Exception as e:
             logger.error(f"Failed to trigger {self.config['SERVER_TYPE']} fallback scan: {e}")
 
+    def _get_plex_activities(self):
+        """Fetch Plex activities with a short cache to prevent concurrent threads from spamming the API."""
+        if not self.plex:
+            return []
+            
+        with self._activities_lock:
+            # Cache for 4 seconds
+            if self._activities_cache is not None and time.time() - self._activities_cache_time < 4.0:
+                return self._activities_cache
+
+            try:
+                url = f"{self.plex._baseurl}/activities"
+                headers = {
+                    "Accept": "application/json",
+                    "X-Plex-Token": self.plex._token
+                }
+                res = self.plex._session.get(url, headers=headers, timeout=10)
+                if res.status_code == 200:
+                    data = res.json()
+                    container = data.get('MediaContainer', {})
+                    activities = container.get('Activity', [])
+                    self._activities_cache = activities
+                    self._activities_cache_time = time.time()
+                    return activities
+            except Exception as e:
+                logger.debug(f"Failed to fetch Plex activities: {e}")
+            
+            return []
+
     def _trigger_plex_scan(self, library_id, folder_path, metadata=None):
         if not self.plex:
             try:
@@ -1079,17 +1149,8 @@ class PlexScanner:
                         break
 
                     is_scanning = False
-                    url = f"{self.plex._baseurl}/activities"
-                    headers = {
-                        "Accept": "application/json",
-                        "X-Plex-Token": self.plex._token
-                    }
-                    res = self.plex._session.get(url, headers=headers)
-                    if res.status_code == 200:
-                        data = res.json()
-                        container = data.get('MediaContainer', {})
-                        activities = container.get('Activity', [])
-                        for activity in activities:
+                    activities = self._get_plex_activities()
+                    for activity in activities:
                             if activity.get('type') == 'library.refresh.section':
                                 context = activity.get('Context', {})
                                 if str(context.get('sectionID')) == library_id:
@@ -1364,7 +1425,7 @@ class PlexScanner:
                     return
                 self.pending_files.add(norm_path)
 
-            logger.info(f"🆕 Found new file: {BOLD}{file_path}{RESET}")
+            logger.info(f"🆕 Found new or upgraded file: {BOLD}{file_path}{RESET}")
             
             MISSING_FILES_TOTAL.inc()
             
@@ -1396,6 +1457,15 @@ class PlexScanner:
                         self.pending_notifications[target_path]['added'].append(file_path)
                     
                     self.trigger_scan(library_id, target_path)
+                    
+                    # Update local cache to prevent repeated trigger on this upgrade
+                    with self.library_files_lock:
+                        fc = self.library_files.get(library_id)
+                        if isinstance(fc, dict) and norm_path in fc:
+                            try:
+                                fc[norm_path] = os.path.getsize(file_path)
+                            except Exception:
+                                pass
 
             if not should_scan:
                 with self.pending_files_lock:
@@ -1468,58 +1538,34 @@ class PlexScanner:
             self.trigger_scan(library_id, target_path, metadata={'event_type': 'deleted'})
 
     def scan_directory(self, path, stats, tracker, folders_to_scan, folders_to_scan_lock, force_full=False):
-        # Pre-calculate cutoff time for incremental scan
         cutoff_time = 0
         is_incremental = self.config.get('INCREMENTAL_SCAN') and not force_full
         if is_incremental:
             cutoff_time = time.time() - (self.config['SCAN_SINCE_DAYS'] * 86400)
 
-        for root, dirs, files in os.walk(path, followlinks=True):
-            
-            # Prune ignored directories in-place to avoid traversing them
-            # This is a significant optimization for large ignored trees (e.g. .git, extras)
-            dirs[:] = [d for d in dirs if not self.is_ignored(os.path.join(root, d)) and self.should_scan_directory(os.path.join(root, d))]
-            
-            if is_incremental:
-                try:
-                    mtime = os.path.getmtime(root)
-                    if mtime < cutoff_time:
-                        continue
-                except OSError:
-                    pass
-
-            dirs.sort()
-            files.sort()
-            for file in files:
-                
-                # Rate Limiting
+        def process_files_in_dir(files_batch):
+            for file_path in files_batch:
                 if self.config['SCAN_DELAY'] > 0:
                     time.sleep(self.config['SCAN_DELAY'])
-
-                if file.startswith('.'):
+                    
+                file_name = os.path.basename(file_path)
+                if file_name.startswith('.'):
                     continue
-
-                file_ext = os.path.splitext(file)[1].lower()
+                    
+                file_ext = os.path.splitext(file_name)[1].lower()
                 if file_ext not in self.config['MEDIA_EXTENSIONS']:
                     continue
-
-                file_path = os.path.join(root, file)
-                
+                    
                 if self.is_ignored(file_path):
                     continue
-
-                # NEW: Early Library Check
-                # Ensure the file actually belongs to a Plex/Jellyfin library path before proceeding.
+                    
                 library_id, library_title, library_type = self.get_library_id_for_path(file_path)
                 if not library_id:
-                    # Not in any library, skip entirely.
                     continue
 
                 stats.increment_scanned()
                 SCANNED_FILES_TOTAL.inc()
 
-                # Only check library membership for video/audio files.
-                # Subtitle sidecar files are not Plex library items.
                 if file_ext not in self.config['LIBRARY_EXTENSIONS']:
                     continue
 
@@ -1544,12 +1590,65 @@ class PlexScanner:
                     else:
                         stats.add_missing_item(library_title, file_path)
                         parent_folder = os.path.dirname(file_path)
-                        
-                        # If parent is library root, scan file instead
                         target_path = file_path if self.is_library_root(library_id, parent_folder) else parent_folder
                         
                         with folders_to_scan_lock:
                             folders_to_scan.add((library_id, target_path))
+
+        max_workers = self.config.get('SCAN_WORKERS', 4)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = []
+            from collections import deque
+            import concurrent.futures
+            dirs_to_process = deque([path])
+            
+            while dirs_to_process:
+                current_dir = dirs_to_process.popleft()
+                
+                skip_files = False
+                if is_incremental:
+                    try:
+                        if os.path.getmtime(current_dir) < cutoff_time:
+                            skip_files = True
+                    except OSError:
+                        pass
+                
+                files_batch = []
+                try:
+                    with os.scandir(current_dir) as it:
+                        for entry in it:
+                            if entry.name.startswith('.'):
+                                continue
+                                
+                            try:
+                                if entry.is_dir(follow_symlinks=True):
+                                    if not self.is_ignored(entry.path) and self.should_scan_directory(entry.path):
+                                        dirs_to_process.append(entry.path)
+                                elif entry.is_file(follow_symlinks=True) and not skip_files:
+                                    files_batch.append(entry.path)
+                            except OSError:
+                                pass
+                except OSError as e:
+                    logger.debug(f"Error accessing directory {current_dir}: {e}")
+                    
+                if files_batch:
+                    futures.append(executor.submit(process_files_in_dir, files_batch))
+                    
+                # Prevent memory and CPU explosion by limiting queued tasks
+                if len(futures) > 1000:
+                    done, not_done = concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_COMPLETED)
+                    futures = list(not_done)
+                    for future in done:
+                        try:
+                            future.result()
+                        except Exception as e:
+                            logger.error(f"Error processing files in scan_directory: {e}")
+                    
+            for future in futures:
+                try:
+                    future.result()
+                except Exception as e:
+                    logger.error(f"Error processing files in scan_directory: {e}")
 
     def run_scan(self, force_full=False):
         from .models import RunStats, StuckFileTracker

@@ -38,6 +38,18 @@ class PlexWatcher(FileSystemEventHandler):
             # Trigger scan for parent directory
             parent = os.path.dirname(event.src_path)
             lid, _, _ = self.scanner.get_library_id_for_path(parent)
+            
+            # Mass Deletion Protection
+            if lid and self.scanner.config.get('ABORT_ON_MASS_DELETION'):
+                threshold = self.scanner.config.get('DELETION_THRESHOLD', 50)
+                fc = self.scanner.library_files.get(lid, {})
+                if isinstance(fc, dict):
+                    norm_deleted = os.path.normpath(event.src_path)
+                    count = sum(1 for p in fc if p.startswith(norm_deleted + os.sep) or p == norm_deleted)
+                    if count > threshold:
+                        logger.error(f"🛑 ABORTING SCAN: Directory '{event.src_path}' deleted containing {count} items (Threshold: {threshold}).")
+                        return
+
             if lid:
                 self.scanner.trigger_scan(lid, parent)
 
