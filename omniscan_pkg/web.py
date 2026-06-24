@@ -19,7 +19,7 @@ from nicegui import ui, app as nicegui_app
 nicegui_app.config.socket_io_js_transports = ['polling', 'websocket']
 from plexapi.server import PlexServer
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
-from .config import get_webhook_token, load_config
+from .config import get_webhook_token, load_config, normalize_emby_url
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from .webhook_parser import parse_webhook
 from .ui import init_ui
@@ -447,7 +447,7 @@ async def setup_submit(r: SetupSubmit, request: Request):
     c['SERVER_TYPE'] = r.server_type
     c['PLEX_URL'] = r.plex_server
     c['TOKEN'] = r.plex_token
-    c['SERVER_URL'] = r.server_url
+    c['SERVER_URL'] = normalize_emby_url(r.server_url, c['SERVER_TYPE'])
     c['API_KEY'] = r.api_key
     c['SCAN_PATHS'] = [p.strip() for p in r.scan_directories.replace(',', '\n').split('\n') if p.strip()]
 
@@ -489,7 +489,7 @@ async def update_settings(s: SettingsUpdate, u: str = Depends(get_current_user))
     if not scanner_instance: return JSONResponse({"error": "init"}, status_code=500)
     c = scanner_instance.config
     c['SERVER_TYPE'] = s.server_type
-    c['SERVER_URL'] = unmask_v(s.server_url, c.get('SERVER_URL', ''))
+    c['SERVER_URL'] = normalize_emby_url(unmask_v(s.server_url, c.get('SERVER_URL', '')), c['SERVER_TYPE'])
     c['API_KEY'] = unmask_v(s.api_key, c.get('API_KEY', ''))
     c['PLEX_URL'] = s.plex_server
     c['TOKEN'] = unmask_v(s.plex_token, c.get('TOKEN', ''))

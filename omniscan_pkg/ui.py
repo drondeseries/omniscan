@@ -9,7 +9,7 @@ import requests
 import configparser
 import logging
 import asyncio
-from .config import get_webhook_token
+from .config import get_webhook_token, normalize_emby_url
 from datetime import datetime
 from collections import defaultdict
 from plexapi.server import PlexServer
@@ -1405,7 +1405,7 @@ def init_ui(app, scanner):
 
                     c = scanner.config
                     c['SERVER_TYPE'] = server_type.value
-                    c['SERVER_URL'] = unmasked_server_url
+                    c['SERVER_URL'] = normalize_emby_url(unmasked_server_url, c['SERVER_TYPE'])
                     c['API_KEY'] = unmasked_api_key
                     c['PLEX_URL'] = plex_url.value
                     c['TOKEN'] = unmasked_token
@@ -1691,7 +1691,7 @@ def init_ui(app, scanner):
                             c['SERVER_TYPE'] = server_type_select.value
                             c['PLEX_URL'] = plex_server_field.value
                             c['TOKEN'] = plex_token_field.value
-                            c['SERVER_URL'] = server_url_field.value
+                            c['SERVER_URL'] = normalize_emby_url(server_url_field.value, c['SERVER_TYPE'])
                             c['API_KEY'] = api_key_field.value
                             c['SCAN_PATHS'] = [p.strip() for p in scan_directories_field.value.replace(',', '\n').split('\n') if p.strip()]
                             

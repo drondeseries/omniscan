@@ -1019,13 +1019,53 @@ class PlexScanner:
                     del self.library_files[lib_id_int]
 
     def _trigger_jellyfin_emby_scan(self, library_id, folder_path, metadata=None):
-        """Tiered trigger: try ScanPath first, fallback to Media/Updated. Returns True if plugin scan succeeded."""
+        """Tiered trigger: try ScanPath first, fallback to Media/Updated, and monitor completion."""
+        # Try targeted scan plugin first
         if self._try_plugin_scan(folder_path, metadata):
             return True
         
+        server_type = self.config.get('SERVER_TYPE', 'jellyfin')
+        
         # Fallback to standard behavior
-        self._fallback_trigger_scan(folder_path, metadata)
-        return False
+        try:
+            self._fallback_trigger_scan(folder_path, metadata)
+            
+            # Wait a moment for server to receive and start the scan task
+            time.sleep(5)
+            
+            max_wait = 600
+            start_wait = time.time()
+            
+            while True:
+                if time.time() - start_wait > max_wait:
+                    logger.warning(f"⚠️ {server_type.capitalize()} scan wait timed out for: {folder_path}")
+                    break
+                
+                try:
+                    if not self._is_jellyfin_emby_scanning():
+                        logger.info(f"✅ {server_type.capitalize()} scan finished for: {folder_path}")
+                        
+                        # Trigger metadata refresh/analysis on newly added files
+                        added_files = []
+                        if folder_path in self.pending_notifications:
+                            added_files = self.pending_notifications[folder_path].get('added', [])
+                        if not added_files and metadata and metadata.get('event_type') == 'added':
+                            added_files = [folder_path]
+                            
+                        if added_files:
+                            for fpath in added_files:
+                                self.scan_monitor_executor.submit(self._post_scan_process_file, fpath)
+                        break
+                    
+                    time.sleep(5)
+                except Exception as monitor_err:
+                    logger.error(f"Error checking {server_type} scan status: {monitor_err}")
+                    time.sleep(5)
+                    
+            return True
+        except Exception as e:
+            logger.error(f"Failed to trigger {server_type.capitalize()} scan for {folder_path}: {e}")
+            return False
 
     def _try_plugin_scan(self, folder_path, metadata):
         """Try to use the Targeted Scan plugin (ScanPath)."""
@@ -1085,6 +1125,28 @@ class PlexScanner:
             self.history.add_event("Scan Triggered (Fallback)", folder_path, self.config['SERVER_TYPE'])
         except Exception as e:
             logger.error(f"Failed to trigger {self.config['SERVER_TYPE']} fallback scan: {e}")
+
+    def _is_jellyfin_emby_scanning(self):
+        """Check if Jellyfin/Emby is currently scanning the media library by querying scheduled tasks."""
+        url = f"{self.config['SERVER_URL']}/ScheduledTasks"
+        headers = {
+            "X-Emby-Token": self.config['API_KEY'],
+            "Accept": "application/json"
+        }
+        try:
+            response = self.http_session.get(url, headers=headers, timeout=5)
+            if response.status_code == 200:
+                tasks = response.json()
+                for task in tasks:
+                    task_key = task.get('Key')
+                    task_name = task.get('Name', '')
+                    if task_key in ['RefreshLibrary', 'ScanMediaLibrary'] or 'scan media library' in task_name.lower():
+                        state = task.get('State', '')
+                        # State can be 'Running' or 'Idle'
+                        return isinstance(state, str) and state.lower() == 'running'
+        except Exception as e:
+            logger.debug(f"Failed to check Jellyfin/Emby scan status: {e}")
+        return False
 
     def _get_plex_activities(self):
         """Fetch Plex activities with a short cache to prevent concurrent threads from spamming the API."""

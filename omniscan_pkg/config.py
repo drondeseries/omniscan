@@ -27,6 +27,14 @@ def get_config_val(config, env_key, config_section, config_key, fallback=None, c
             return fallback
     return val
 
+def normalize_emby_url(url, server_type):
+    """Normalize Emby URL to include the /emby prefix if not present."""
+    if url and server_type == 'emby':
+        url_stripped = url.rstrip('/')
+        if not url_stripped.endswith('/emby'):
+            return f"{url_stripped}/emby"
+    return url
+
 def load_config(config_path='config.ini'):
     config = configparser.ConfigParser()
     config.read(config_path)
@@ -39,7 +47,8 @@ def load_config(config_path='config.ini'):
     cfg['TOKEN'] = get_config_val(config, 'PLEX_TOKEN', 'plex', 'token')
     
     # Generic Server support (Emby/Jellyfin)
-    cfg['SERVER_URL'] = get_config_val(config, 'SERVER_URL', 'server', 'url')
+    server_url = get_config_val(config, 'SERVER_URL', 'server', 'url')
+    cfg['SERVER_URL'] = normalize_emby_url(server_url, cfg['SERVER_TYPE'])
     cfg['API_KEY'] = get_config_val(config, 'API_KEY', 'server', 'api_key')
     
     cfg['LOG_LEVEL'] = get_config_val(config, 'LOG_LEVEL', 'logs', 'loglevel', 'INFO')
