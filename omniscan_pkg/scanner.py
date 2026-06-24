@@ -552,20 +552,18 @@ class PlexScanner:
             library_id, _, _ = self.get_library_id_for_path(file_path)
         if not library_id: return False
         
-        url = f"{self.config['SERVER_URL']}/Items?ParentId={library_id}&Recursive=true&Fields=Path&IncludeItemTypes=Movie,Episode,Audio,MusicVideo"
-        headers = {"X-Emby-Token": self.config['API_KEY']}
+        headers = {"X-Emby-Token": self.config['API_KEY'], "Accept": "application/json"}
         try:
-            # We don't want to fetch all items if we are just checking one
-            # Jellyfin supports Path filter in some versions or via Search
-            # For simplicity, if we don't have cache, we might have to use a targeted query
-            # Search by term (filename) is often faster than fetching all
             filename = os.path.basename(file_path)
             search_url = f"{self.config['SERVER_URL']}/Items?ParentId={library_id}&Recursive=true&Fields=Path&IncludeItemTypes=Movie,Episode,Audio,MusicVideo&searchTerm={quote(filename)}"
-            res = requests.get(search_url, headers=headers)
+            res = self.http_session.get(search_url, headers=headers, timeout=10)
             res.raise_for_status()
             items = res.json().get('Items', [])
+            
+            norm_file_path = os.path.normpath(file_path).lower()
             for item in items:
-                if item.get('Path') == file_path:
+                item_path = item.get('Path')
+                if item_path and os.path.normpath(item_path).lower() == norm_file_path:
                     return True
             return False
         except Exception as e:
@@ -1327,12 +1325,24 @@ class PlexScanner:
         headers = {"X-Emby-Token": self.config['API_KEY'], "Accept": "application/json"}
         params = {"Path": file_path, "Fields": "Path"}
         try:
-            res = self.http_session.get(url, headers=headers, params=params)
+            res = self.http_session.get(url, headers=headers, params=params, timeout=10)
             res.raise_for_status()
             data = res.json()
             items = data.get('Items', [])
             if items:
                 return items[0].get('Id')
+            
+            # Fallback to searching by filename if direct path lookup failed
+            filename = os.path.basename(file_path)
+            search_url = f"{self.config['SERVER_URL']}/Items?Recursive=true&Fields=Path&searchTerm={quote(filename)}"
+            res = self.http_session.get(search_url, headers=headers, timeout=10)
+            res.raise_for_status()
+            items = res.json().get('Items', [])
+            norm_file_path = os.path.normpath(file_path).lower()
+            for item in items:
+                item_path = item.get('Path')
+                if item_path and os.path.normpath(item_path).lower() == norm_file_path:
+                    return item.get('Id')
             return None
         except Exception as e:
             logger.error(f"Error getting Jellyfin/Emby item ID for {file_path}: {e}")
@@ -1364,24 +1374,22 @@ class PlexScanner:
         time.sleep(2)
         
         if server_type == 'plex':
-            # Check if analyze or refresh is enabled
-            if not self.config.get('PLEX_ANALYZE') and not self.config.get('PLEX_REFRESH'):
-                return
-                
             rating_key = self.get_plex_rating_key(file_path)
             if rating_key:
-                self.analyze_and_refresh_item(rating_key)
+                # Clear stuck status immediately as it's now confirmed in the library!
+                self.history.clear_entry(file_path)
+                if self.config.get('PLEX_ANALYZE') or self.config.get('PLEX_REFRESH'):
+                    self.analyze_and_refresh_item(rating_key)
             else:
                 logger.debug(f"Could not find Plex ratingKey for newly scanned file: {file_path}")
                 
         elif server_type in ['jellyfin', 'emby']:
-            if not self.config.get('PLEX_REFRESH'):
-                # Treat PLEX_REFRESH as generic refresh config
-                return
-                
             item_id = self.get_jellyfin_item_id(file_path)
             if item_id:
-                self.refresh_jellyfin_item(item_id)
+                # Clear stuck status immediately as it's now confirmed in the library!
+                self.history.clear_entry(file_path)
+                if self.config.get('PLEX_REFRESH'):
+                    self.refresh_jellyfin_item(item_id)
             else:
                 logger.debug(f"Could not find Jellyfin/Emby item ID for newly scanned file: {file_path}")
 
