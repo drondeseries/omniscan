@@ -74,7 +74,11 @@ class PlexScanner:
         self._activities_lock = threading.Lock()
         
         # Persistent session for connection pooling
+        from requests.adapters import HTTPAdapter
         self.http_session = requests.Session()
+        adapter = HTTPAdapter(pool_connections=100, pool_maxsize=100)
+        self.http_session.mount('http://', adapter)
+        self.http_session.mount('https://', adapter)
         self.http_session.headers.update({
             'User-Agent': 'Omniscan/1.0'
         })
@@ -225,7 +229,7 @@ class PlexScanner:
         url = f"{self.config['SERVER_URL']}/Library/VirtualFolders"
         headers = {"X-Emby-Token": self.config['API_KEY']}
         try:
-            res = requests.get(url, headers=headers)
+            res = self.http_session.get(url, headers=headers)
             res.raise_for_status()
             data = res.json()
             
@@ -587,7 +591,7 @@ class PlexScanner:
                 # Fetch items in batches using StartIndex and Limit
                 url = f"{self.config['SERVER_URL']}/Items?ParentId={library_id}&Recursive=true&Fields=Path&IncludeItemTypes=Movie,Episode,Audio,MusicVideo,MusicAlbum&StartIndex={start_index}&Limit={batch_size}"
                 headers = {"X-Emby-Token": self.config['API_KEY']}
-                res = requests.get(url, headers=headers)
+                res = self.http_session.get(url, headers=headers)
                 res.raise_for_status()
                 data = res.json()
                 items = data.get('Items', [])

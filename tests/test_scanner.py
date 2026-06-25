@@ -62,16 +62,32 @@ class TestPlexScanner(unittest.TestCase):
              patch('os.path.exists', return_value=True):
             self.assertFalse(self.scanner.is_broken_symlink('/path/to/valid_link'))
 
-    @patch('os.walk')
+    @patch('os.scandir')
     @patch('os.path.getsize')
-    def test_scan_directory(self, mock_getsize, mock_walk):
-        mock_walk.return_value = [
-            ('/data', [], ['movie.mkv', 'ignored.tmp', 'text.txt'])
-        ]
+    def test_scan_directory(self, mock_getsize, mock_scandir):
+        mock_movie = MagicMock()
+        mock_movie.name = 'movie.mkv'
+        mock_movie.path = '/data/movie.mkv'
+        mock_movie.is_dir.return_value = False
+        mock_movie.is_file.return_value = True
+
+        mock_ignored = MagicMock()
+        mock_ignored.name = 'ignored.tmp'
+        mock_ignored.path = '/data/ignored.tmp'
+        mock_ignored.is_dir.return_value = False
+        mock_ignored.is_file.return_value = True
+
+        mock_txt = MagicMock()
+        mock_txt.name = 'text.txt'
+        mock_txt.path = '/data/text.txt'
+        mock_txt.is_dir.return_value = False
+        mock_txt.is_file.return_value = True
+
+        mock_scandir.return_value.__enter__.return_value = [mock_movie, mock_ignored, mock_txt]
         mock_getsize.return_value = 1000
         
-        # Mock is_in_plex to return False (missing)
-        self.scanner.is_in_plex = MagicMock(return_value=False)
+        # Mock is_in_library to return False (missing)
+        self.scanner.is_in_library = MagicMock(return_value=False)
         self.scanner.get_library_id_for_path = MagicMock(return_value=('1', 'Movies', 'movie'))
         
         stats = RunStats(self.config)
