@@ -90,5 +90,47 @@ class TestDeletionLogic(unittest.TestCase):
         # Should not trigger scan
         self.scanner.trigger_scan.assert_not_called()
 
+    def test_trigger_scan_metadata_merging(self):
+        # Restore real trigger_scan for this test
+        self.scanner.trigger_scan = lambda library_id, folder_path, force=False, metadata=None: \
+            PlexScanner.trigger_scan(self.scanner, library_id, folder_path, force, metadata)
+
+        # 1. Start with a deletion event
+        self.scanner.trigger_scan('1', '/mnt/usenet-rclone/tv/ShowName/Season 01', metadata={'event_type': 'deleted'})
+        
+        # Verify it is in pending scans
+        key = ('1', '/mnt/usenet-rclone/tv/ShowName/Season 01', None)
+        self.assertIn(key, self.scanner.pending_scans)
+        _, metadata = self.scanner.pending_scans[key]
+        self.assertEqual(metadata.get('event_type'), 'deleted')
+
+        # 2. Add an addition event to the same folder path (de-bounces/updates)
+        self.scanner.trigger_scan('1', '/mnt/usenet-rclone/tv/ShowName/Season 01', metadata={'event_type': 'added'})
+
+        # Verify that 'deleted' event type was preserved in the merged metadata
+        _, metadata = self.scanner.pending_scans[key]
+        self.assertEqual(metadata.get('event_type'), 'deleted')
+
+    def test_trigger_scan_collapsing(self):
+        # Restore real trigger_scan
+        self.scanner.trigger_scan = lambda library_id, folder_path, force=False, metadata=None: \
+            PlexScanner.trigger_scan(self.scanner, library_id, folder_path, force, metadata)
+
+        # 1. Queue a deletion scan for a sub-folder
+        self.scanner.trigger_scan('1', '/mnt/usenet-rclone/tv/ShowName/Season 01/Episode 01', metadata={'event_type': 'deleted'})
+
+        # 2. Queue a broader scan for the parent folder (Case 2 collapsing)
+        self.scanner.trigger_scan('1', '/mnt/usenet-rclone/tv/ShowName/Season 01', metadata={'event_type': 'added'})
+
+        # Verify the sub-folder scan was removed
+        sub_key = ('1', '/mnt/usenet-rclone/tv/ShowName/Season 01/Episode 01', None)
+        self.assertNotIn(sub_key, self.scanner.pending_scans)
+
+        # Verify the parent folder scan is active and has inherited the 'deleted' metadata
+        parent_key = ('1', '/mnt/usenet-rclone/tv/ShowName/Season 01', None)
+        self.assertIn(parent_key, self.scanner.pending_scans)
+        _, metadata = self.scanner.pending_scans[parent_key]
+        self.assertEqual(metadata.get('event_type'), 'deleted')
+
 if __name__ == '__main__':
     unittest.main()

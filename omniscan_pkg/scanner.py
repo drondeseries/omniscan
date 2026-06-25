@@ -703,32 +703,66 @@ class PlexScanner:
             self._do_trigger_scan(library_id, folder_path)
             return
 
+        # Start with the new metadata
+        merged_metadata = {}
+        if metadata:
+            merged_metadata.update(metadata)
+
         with self.pending_scans_lock:
             # Check for parent/child redundancies
             keys_to_remove = []
-            for (pid, ppath, _) in list(self.pending_scans.keys()):
+            for (pid, ppath, extra_val) in list(self.pending_scans.keys()):
                 if pid == library_id:
                     # Case 1: A parent/ancestor of the new folder is already pending scan.
                     if folder_path.startswith(ppath + os.sep) or ppath == folder_path:
                         logger.debug(f"⏳ Updating debounce for pending scan {ppath} due to activity in {folder_path}")
                         # Update the parent's debounce timer so we wait for the LATEST file
-                        old_time, old_metadata = self.pending_scans[(pid, ppath, _)]
-                        self.pending_scans[(pid, ppath, _)] = (time.time(), metadata or old_metadata)
+                        old_time, old_metadata = self.pending_scans[(pid, ppath, extra_val)]
+                        
+                        # Merge metadata
+                        final_metadata = {}
+                        if old_metadata:
+                            final_metadata.update(old_metadata)
+                        final_metadata.update(merged_metadata)
+                        
+                        # Preserve 'deleted' event type if either was deleted
+                        if (old_metadata and old_metadata.get('event_type') == 'deleted') or \
+                           (merged_metadata.get('event_type') == 'deleted'):
+                            final_metadata['event_type'] = 'deleted'
+                            
+                        self.pending_scans[(pid, ppath, extra_val)] = (time.time(), final_metadata)
                         return
 
                     # Case 2: The new folder is a parent/ancestor of an already pending scan.
                     if ppath.startswith(folder_path + os.sep):
                         logger.debug(f"⏳ Removing specific pending scan {ppath} in favor of broad parent scan {folder_path}")
-                        keys_to_remove.append((pid, ppath, _))
+                        old_time, old_metadata = self.pending_scans[(pid, ppath, extra_val)]
+                        # Carry over 'deleted' event type if the sub-folder scan was a deletion
+                        if old_metadata and old_metadata.get('event_type') == 'deleted':
+                            merged_metadata['event_type'] = 'deleted'
+                        keys_to_remove.append((pid, ppath, extra_val))
 
             for k in keys_to_remove:
                 del self.pending_scans[k]
 
             is_new = (library_id, folder_path, None) not in self.pending_scans
-            # Update the last event time for this (library, folder)
-            self.pending_scans[(library_id, folder_path, None)] = (time.time(), metadata)
-            if metadata and folder_path in self.pending_notifications:
-                self.pending_notifications[folder_path]['metadata'] = metadata
+            
+            # If there's already a pending scan for this exact path, we merge
+            if not is_new:
+                old_time, old_metadata = self.pending_scans[(library_id, folder_path, None)]
+                final_metadata = {}
+                if old_metadata:
+                    final_metadata.update(old_metadata)
+                final_metadata.update(merged_metadata)
+                if (old_metadata and old_metadata.get('event_type') == 'deleted') or \
+                   (merged_metadata.get('event_type') == 'deleted'):
+                    final_metadata['event_type'] = 'deleted'
+                self.pending_scans[(library_id, folder_path, None)] = (time.time(), final_metadata)
+            else:
+                self.pending_scans[(library_id, folder_path, None)] = (time.time(), merged_metadata)
+                
+            if merged_metadata and folder_path in self.pending_notifications:
+                self.pending_notifications[folder_path]['metadata'] = merged_metadata
             if is_new:
                 logger.info(f"⏳ Scan queued (debouncing): {BOLD}{folder_path}{RESET}")
 
@@ -1428,7 +1462,7 @@ class PlexScanner:
             import subprocess
             try:
                 cmd = ["ffprobe", "-v", "error", "-show_format", "-show_streams", file_path]
-                res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5)
+                res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30)
                 if res.returncode != 0:
                     err_msg = res.stderr.strip() if res.stderr else f"exit code {res.returncode}"
                     return False, f"ffprobe error: {err_msg}"

@@ -51,7 +51,7 @@ class PlexWatcher(FileSystemEventHandler):
                         return
 
             if lid:
-                self.scanner.trigger_scan(lid, parent)
+                self.scanner.trigger_scan(lid, parent, metadata={'event_type': 'deleted'})
 
 def start_watcher(scanner, stop_event=None):
     """Start the watchdog observer."""
