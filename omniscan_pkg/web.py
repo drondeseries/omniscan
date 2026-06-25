@@ -65,6 +65,45 @@ try:
 except Exception as e:
     logger.warning(f"Failed to apply python-engineio translate_request patch: {e}")
 
+# Monkeypatch python-engineio handle_request to prevent KeyError: 'Session is disconnected' / 'Session not found' during concurrent disconnects.
+try:
+    import engineio.async_server
+    import inspect
+    import urllib.parse
+    original_handle_request = engineio.async_server.AsyncServer.handle_request
+
+    async def patched_handle_request(self, *args, **kwargs):
+        try:
+            return await original_handle_request(self, *args, **kwargs)
+        except KeyError as e:
+            if 'session' in str(e).lower():
+                try:
+                    translate_request = self._async['translate_request']
+                    if inspect.iscoroutinefunction(translate_request):
+                        environ = await translate_request(*args, **kwargs)
+                    else:
+                        environ = translate_request(*args, **kwargs)
+                except Exception:
+                    environ = {}
+                
+                sid = "unknown"
+                try:
+                    query = urllib.parse.parse_qs(environ.get('QUERY_STRING', ''))
+                    if 'sid' in query:
+                        sid = query['sid'][0]
+                except Exception:
+                    pass
+
+                self._log_error_once(f'Invalid session {sid}', 'bad-sid')
+                r = self._bad_request(f'Invalid session {sid}')
+                return await self._make_response(r, environ)
+            else:
+                raise
+
+    engineio.async_server.AsyncServer.handle_request = patched_handle_request
+except Exception as e:
+    logger.warning(f"Failed to apply python-engineio handle_request patch: {e}")
+
 app = FastAPI()
 
 main_loop = None

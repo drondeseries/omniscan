@@ -54,5 +54,31 @@ class TestWebHookAPI(unittest.TestCase):
         self.assertEqual(response.json(), {"status": "success", "triggered": 1})
         self.mock_scanner.submit_file_event.assert_called_once_with('created', '/media/movies/TestMovie.mkv', metadata=None)
 
+    def test_engineio_session_disconnected_handling(self):
+        import asyncio
+        from unittest.mock import AsyncMock
+        import engineio.async_server
+        
+        async def run_test():
+            server = engineio.async_server.AsyncServer()
+            server._async = {
+                'translate_request': lambda *args, **kwargs: {'QUERY_STRING': 'sid=123', 'REQUEST_METHOD': 'POST'}
+            }
+            server._log_error_once = MagicMock()
+            server._bad_request = MagicMock(return_value={'bad': 'request'})
+            server._make_response = AsyncMock(return_value='response')
+
+            with patch('omniscan_pkg.web.original_handle_request', new_callable=AsyncMock) as mock_orig:
+                mock_orig.side_effect = KeyError('Session is disconnected')
+                
+                res = await server.handle_request('scope', 'receive', 'send')
+                
+                self.assertEqual(res, 'response')
+                server._log_error_once.assert_called_once_with('Invalid session 123', 'bad-sid')
+                server._bad_request.assert_called_once_with('Invalid session 123')
+                server._make_response.assert_called_once_with({'bad': 'request'}, {'QUERY_STRING': 'sid=123', 'REQUEST_METHOD': 'POST'})
+        
+        asyncio.run(run_test())
+
 if __name__ == '__main__':
     unittest.main()
