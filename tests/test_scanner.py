@@ -110,5 +110,35 @@ class TestPlexScanner(unittest.TestCase):
         self.assertEqual(stats.total_missing, 1)
         self.assertEqual(len(folders_to_scan), 1)
 
+    def test_calculate_missing_files_ignores_broken_symlink(self):
+        self.scanner.library_sections_cache = [{
+            'id': '1',
+            'title': 'Movies',
+            'type': 'movie',
+            'locations': ['/data']
+        }]
+        self.scanner.library_files = {
+            '1': set()
+        }
+        
+        def mock_exists(path):
+            if path == '/data':
+                return True
+            if path == '/data/movie.mkv':
+                return True
+            if path == '/data/broken.mkv':
+                return False
+            return False
+
+        with patch('os.path.exists', side_effect=mock_exists), \
+             patch('os.walk', return_value=[('/data', [], ['movie.mkv', 'broken.mkv'])]), \
+             patch('os.path.islink', side_effect=lambda p: p == '/data/broken.mkv'):
+            
+            missing_cnt = self.scanner.calculate_missing_files_for_library('1')
+            
+            self.assertEqual(missing_cnt, 1)
+            self.assertIn('/data/movie.mkv', self.scanner.library_missing_files['1'])
+            self.assertNotIn('/data/broken.mkv', self.scanner.library_missing_files['1'])
+
 if __name__ == '__main__':
     unittest.main()

@@ -319,7 +319,7 @@ class PlexScanner:
             logger.info(f"💾 Initializing cache for library {BOLD}{section.title}{RESET}...")
             cache_start = time.time()
             
-            batch_size = 10000
+            batch_size = 1000
             endpoint = "/allLeaves" if section.type in ['show', 'artist'] else "/all"
             url = f"{self.plex._baseurl}/library/sections/{library_id}{endpoint}"
             headers = {
@@ -447,7 +447,10 @@ class PlexScanner:
                             norm_root = os.path.normpath(root)
                             for path in existing_missing:
                                 if os.path.dirname(path) == norm_root:
-                                    missing_files.add(path)
+                                    if self.config.get('SYMLINK_CHECK') and self.is_broken_symlink(path):
+                                        continue
+                                    if path not in cached_files:
+                                        missing_files.add(path)
                             continue
                     except OSError:
                         pass
@@ -456,6 +459,8 @@ class PlexScanner:
                     if ext in lib_exts:
                         full_path = os.path.join(root, f)
                         norm_path = os.path.normpath(full_path)
+                        if self.config.get('SYMLINK_CHECK') and self.is_broken_symlink(norm_path):
+                            continue
                         if norm_path not in cached_files:
                             missing_files.add(norm_path)
                             
@@ -1053,6 +1058,9 @@ class PlexScanner:
                 if lib_id_int is not None and lib_id_int in self.library_files:
                     logger.debug(f"🧹 Invalidating cache (int) for library {lib_id_int} after scan")
                     del self.library_files[lib_id_int]
+            
+            # Recalculate missing files/counts in background
+            self._trigger_cache_fill(library_id)
 
     def _trigger_jellyfin_emby_scan(self, library_id, folder_path, metadata=None):
         """Tiered trigger: try ScanPath first, fallback to Media/Updated, and monitor completion."""

@@ -876,7 +876,7 @@ def init_ui(app, scanner):
                                         ui.button('Scan Selected', on_click=scan_selected).classes(
                                             'bg-cyan-600/10 hover:bg-cyan-600 text-cyan-400 hover:text-white '
                                             'rounded-xl border border-cyan-500/20 font-bold text-xs px-3 py-1.5'
-                                        ).props('disable' if is_disabled else '')
+                                        ).set_enabled(not is_disabled)
 
                                         if state['show_stuck_only']:
                                             async def clear_selected():
@@ -893,7 +893,7 @@ def init_ui(app, scanner):
                                             ui.button('Clear Selected', on_click=clear_selected).classes(
                                                 'bg-rose-950/20 hover:bg-rose-600 text-rose-400 hover:text-white '
                                                 'rounded-xl border border-rose-500/20 font-bold text-xs px-3 py-1.5'
-                                            ).props('disable' if is_disabled else '')
+                                            ).set_enabled(not is_disabled)
 
                     for it in items:
                         it_path  = it['path']
