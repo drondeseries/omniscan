@@ -19,6 +19,12 @@ from .metrics import (
 )
 from .models import StuckFileTracker
 
+try:
+    import websocket
+    WEBSOCKET_SUPPORTED = True
+except ImportError:
+    WEBSOCKET_SUPPORTED = False
+
 # ANSI escape codes for text formatting
 BOLD = '\033[1m'
 RESET = '\033[0m'
@@ -31,6 +37,17 @@ class PlexScanner:
     def __init__(self, config):
         self.config = config
         self.plex = None
+        self.plex_listener = None
+        self.active_scan_events = {}
+        self.jellyfin_listener_thread = None
+        self.jellyfin_ws_stop = threading.Event()
+        self.active_jellyfin_scan_events = {}
+        self.active_jellyfin_scan_lock = threading.Lock()
+        
+        server_type = self.config.get('SERVER_TYPE', 'plex')
+        if server_type in ['jellyfin', 'emby']:
+            if self.config.get('SERVER_URL') and self.config.get('API_KEY'):
+                self._start_jellyfin_alert_listener()
         
         # Compile ignore patterns for performance
         self.ignore_regex = None
@@ -152,6 +169,7 @@ class PlexScanner:
                 self.plex = PlexServer(self.config['PLEX_URL'], self.config['TOKEN'], session=self.http_session)
                 # Test connection
                 logger.info(f"Connected to Plex: {self.plex.friendlyName} (v{self.plex.version})")
+                self._start_alert_listener()
                 return self.plex
             except Exception as e:
                 if not retry:
@@ -160,6 +178,117 @@ class PlexScanner:
                 logger.info(f"Retrying in {retry_delay} seconds...")
                 time.sleep(retry_delay)
                 retry_delay = min(retry_delay * 2, max_delay)
+
+    def _start_alert_listener(self):
+        """Start the Plex WebSocket Alert Listener in a background thread."""
+        if not WEBSOCKET_SUPPORTED:
+            logger.debug("Websocket support disabled (websocket-client library not installed).")
+            return
+            
+        if self.plex_listener and self.plex_listener.is_alive():
+            return
+            
+        try:
+            logger.info("📡 Starting Plex Alert Listener (Websocket)...")
+            self.plex_listener = self.plex.startAlertListener(callback=self._on_plex_alert)
+        except Exception as e:
+            logger.warning(f"Failed to start Plex Alert Listener: {e}. Falling back to HTTP polling.")
+            self.plex_listener = None
+
+    def _on_plex_alert(self, data):
+        """Callback for Plex WebSocket alerts."""
+        try:
+            if data.get('notificationName') == 'ActivityNotification':
+                activity_type = data.get('type')
+                state = data.get('state')
+                context = data.get('Context', {})
+                section_id = str(context.get('sectionID'))
+                
+                if activity_type == 'library.refresh.section':
+                    if state != 'running':
+                        event = self.active_scan_events.get(section_id)
+                        if event:
+                            logger.debug(f"🔔 WebSocket scan completion signal received for Plex library section: {section_id}")
+                            event.set()
+        except Exception as e:
+            logger.debug(f"Error handling Plex Alert: {e}")
+
+    def _start_jellyfin_alert_listener(self):
+        """Start the Jellyfin/Emby WebSocket Alert Listener in a background thread."""
+        if not WEBSOCKET_SUPPORTED:
+            logger.debug("Websocket support disabled (websocket-client library not installed).")
+            return
+            
+        if self.jellyfin_listener_thread and self.jellyfin_listener_thread.is_alive():
+            return
+            
+        self.jellyfin_ws_stop.clear()
+        
+        def run_listener():
+            server_url = self.config['SERVER_URL']
+            # Convert http:// or https:// to ws:// or wss://
+            if server_url.startswith('https://'):
+                ws_url = server_url.replace('https://', 'wss://')
+            elif server_url.startswith('http://'):
+                ws_url = server_url.replace('http://', 'ws://')
+            else:
+                logger.warning(f"Invalid server URL for websocket: {server_url}")
+                return
+                
+            # Remove trailing slash if present
+            ws_url = ws_url.rstrip('/')
+            
+            # Jellyfin/Emby WS endpoint
+            import json
+            ws_endpoint = f"{ws_url}/socket?api_key={self.config['API_KEY']}&deviceId=omniscan"
+            
+            logger.info(f"📡 Connecting to Jellyfin/Emby WebSocket: {ws_url}/socket")
+            
+            while not self.jellyfin_ws_stop.is_set():
+                try:
+                    # Using websocket-client to connect
+                    ws = websocket.create_connection(ws_endpoint, timeout=10)
+                    logger.info("✅ Connected to Jellyfin/Emby WebSocket")
+                    
+                    while not self.jellyfin_ws_stop.is_set():
+                        try:
+                            message = ws.recv()
+                            if not message:
+                                break
+                            
+                            data = json.loads(message)
+                            msg_type = data.get('MessageType')
+                            
+                            if msg_type == 'ScheduledTaskEnded':
+                                task_data = data.get('Data', {})
+                                task_key = task_data.get('Key')
+                                status = task_data.get('Status')
+                                
+                                if task_key in ['RefreshLibrary', 'ScanMediaLibrary'] and status == 'Completed':
+                                    logger.debug("🔔 WebSocket: Jellyfin/Emby scan complete event received")
+                                    # Signal all pending Jellyfin scan events
+                                    with self.active_jellyfin_scan_lock:
+                                        for event in self.active_jellyfin_scan_events.values():
+                                            event.set()
+                        except websocket.WebSocketTimeoutException:
+                            # Send a ping to keep connection alive
+                            try:
+                                ws.ping()
+                            except Exception:
+                                break
+                        except Exception as e:
+                            logger.debug(f"Jellyfin WebSocket read error: {e}")
+                            break
+                    ws.close()
+                except Exception as e:
+                    logger.debug(f"Jellyfin WebSocket connection error: {e}")
+                    
+                # Retry delay
+                if not self.jellyfin_ws_stop.is_set():
+                    time.sleep(5)
+                    
+        self.jellyfin_listener_thread = threading.Thread(target=run_listener, daemon=True)
+        self.jellyfin_listener_thread.start()
 
     def is_ignored(self, file_path):
         """Check if file matches any ignore pattern using compiled regex."""
@@ -1070,46 +1199,66 @@ class PlexScanner:
         
         server_type = self.config.get('SERVER_TYPE', 'jellyfin')
         
+        # Setup WebSocket Event if listener is active
+        scan_event = threading.Event()
+        with self.active_jellyfin_scan_lock:
+            self.active_jellyfin_scan_events[folder_path] = scan_event
+            
         # Fallback to standard behavior
         try:
             self._fallback_trigger_scan(folder_path, metadata)
             
-            # Wait a moment for server to receive and start the scan task
-            time.sleep(5)
-            
+            # Start Alert Listener if not already running (failsafe check)
+            if WEBSOCKET_SUPPORTED and (not self.jellyfin_listener_thread or not self.jellyfin_listener_thread.is_alive()):
+                self._start_jellyfin_alert_listener()
+                
             max_wait = 600
             start_wait = time.time()
+            poll_interval = 1.0
             
             while True:
                 if time.time() - start_wait > max_wait:
                     logger.warning(f"⚠️ {server_type.capitalize()} scan wait timed out for: {folder_path}")
                     break
                 
+                # Wait on Event if WebSocket listener is alive, acting as sleep
+                is_ws_active = self.jellyfin_listener_thread and self.jellyfin_listener_thread.is_alive()
+                if is_ws_active:
+                    event_fired = scan_event.wait(timeout=poll_interval)
+                    if event_fired:
+                        logger.info(f"⚡ [Websocket] {server_type.capitalize()} scan completion signal received for: {folder_path}")
+                        break
+                else:
+                    time.sleep(poll_interval)
+
                 try:
                     if not self._is_jellyfin_emby_scanning():
                         logger.info(f"✅ {server_type.capitalize()} scan finished for: {folder_path}")
-                        
-                        # Trigger metadata refresh/analysis on newly added files
-                        added_files = []
-                        if folder_path in self.pending_notifications:
-                            added_files = self.pending_notifications[folder_path].get('added', [])
-                        if not added_files and metadata and metadata.get('event_type') == 'added':
-                            added_files = [folder_path]
-                            
-                        if added_files:
-                            for fpath in added_files:
-                                self.scan_monitor_executor.submit(self._post_scan_process_file, fpath)
                         break
                     
-                    time.sleep(5)
+                    poll_interval = min(poll_interval * 1.5, 5.0)
                 except Exception as monitor_err:
                     logger.error(f"Error checking {server_type} scan status: {monitor_err}")
-                    time.sleep(5)
-                    
+                    poll_interval = min(poll_interval * 1.5, 5.0)
+
+            # Trigger metadata refresh/analysis on newly added files
+            added_files = []
+            if folder_path in self.pending_notifications:
+                added_files = self.pending_notifications[folder_path].get('added', [])
+            if not added_files and metadata and metadata.get('event_type') == 'added':
+                added_files = [folder_path]
+                
+            if added_files:
+                for fpath in added_files:
+                    self.scan_monitor_executor.submit(self._post_scan_process_file, fpath)
+            
             return True
         except Exception as e:
             logger.error(f"Failed to trigger {server_type.capitalize()} scan for {folder_path}: {e}")
             return False
+        finally:
+            with self.active_jellyfin_scan_lock:
+                self.active_jellyfin_scan_events.pop(folder_path, None)
 
     def _try_plugin_scan(self, folder_path, metadata):
         """Try to use the Targeted Scan plugin (ScanPath)."""
@@ -1198,8 +1347,8 @@ class PlexScanner:
             return []
             
         with self._activities_lock:
-            # Cache for 4 seconds
-            if self._activities_cache is not None and time.time() - self._activities_cache_time < 4.0:
+            # Cache for 1.5 seconds to prevent spamming while allowing fast updates
+            if self._activities_cache is not None and time.time() - self._activities_cache_time < 1.5:
                 return self._activities_cache
 
             try:
@@ -1233,21 +1382,39 @@ class PlexScanner:
         encoded_path = quote(folder_path)
         url = f"{self.config['PLEX_URL']}/library/sections/{library_id}/refresh?path={encoded_path}&X-Plex-Token={self.config['TOKEN']}"
         
+        # Setup WebSocket Event if listener is active
+        scan_event = threading.Event()
+        self.active_scan_events[library_id] = scan_event
+        
         try:
             response = self.http_session.get(url)
             response.raise_for_status()
             logger.info(f"🔎 Plex scan triggered for: {BOLD}{folder_path}{RESET}")
             self.history.add_event("Scan Triggered", folder_path, "Plex")
             
-            time.sleep(5) 
-            
+            # Start Alert Listener if not already running (failsafe check)
+            if WEBSOCKET_SUPPORTED and (not self.plex_listener or not self.plex_listener.is_alive()):
+                self._start_alert_listener()
+                
             max_wait = 600
             start_wait = time.time()
+            poll_interval = 1.0
             
             while True:
                 if time.time() - start_wait > max_wait:
                     logger.warning(f"⚠️ Scan wait timed out for: {folder_path}")
                     break
+
+                # Wait on Event if WebSocket alert listener is alive, acting as sleep
+                is_ws_active = self.plex_listener and self.plex_listener.is_alive()
+                if is_ws_active:
+                    # Wait for either event notification or poll timeout
+                    event_fired = scan_event.wait(timeout=poll_interval)
+                    if event_fired:
+                        logger.info(f"⚡ [Websocket] Plex scan completion signal received for: {folder_path}")
+                        break
+                else:
+                    time.sleep(poll_interval)
 
                 try:
                     if not self.plex:
@@ -1257,57 +1424,58 @@ class PlexScanner:
                     is_scanning = False
                     activities = self._get_plex_activities()
                     for activity in activities:
-                            if activity.get('type') == 'library.refresh.section':
-                                context = activity.get('Context', {})
-                                if str(context.get('sectionID')) == library_id:
-                                    is_scanning = True
-                                    break
+                        if activity.get('type') == 'library.refresh.section':
+                            context = activity.get('Context', {})
+                            if str(context.get('sectionID')) == library_id:
+                                is_scanning = True
+                                break
                     
                     if not is_scanning:
                         logger.info(f"✅ Plex scan finished for: {folder_path}")
-                        
-                        # Trigger metadata refresh/analysis on newly added files
-                        added_files = []
-                        if folder_path in self.pending_notifications:
-                            added_files = self.pending_notifications[folder_path].get('added', [])
-                        if not added_files and metadata and metadata.get('event_type') == 'added':
-                            added_files = [folder_path]
-                            
-                        if added_files:
-                            for fpath in added_files:
-                                self.scan_monitor_executor.submit(self._post_scan_process_file, fpath)
-
-                        # Empty trash if deletion event and empty_trash behaviour is enabled
-                        is_deletion = metadata and metadata.get('event_type') == 'deleted'
-                        if is_deletion and self.config.get('EMPTY_TRASH'):
-                            logger.info(f"🧹 Emptying Plex trash for library: {library_id}")
-                            try:
-                                trash_url = f"{self.plex._baseurl}/library/sections/{library_id}/emptyTrash"
-                                trash_headers = {
-                                    "X-Plex-Token": self.plex._token
-                                }
-                                trash_res = self.plex._session.put(trash_url, headers=trash_headers)
-                                trash_res.raise_for_status()
-                                logger.info(f"✅ Plex trash emptied successfully for library: {library_id}")
-                                self.history.add_event("Trash Emptied", f"Library section {library_id}", "Plex")
-                            except Exception as trash_err:
-                                logger.error(f"Failed to empty Plex trash for library {library_id}: {trash_err}")
-                                if isinstance(trash_err, requests.RequestException):
-                                    self.plex = None
-                                
                         break
                     
-                    time.sleep(5)
+                    poll_interval = min(poll_interval * 1.5, 5.0)
                 except Exception as e:
                     logger.error(f"Error checking scan status: {e}")
                     if isinstance(e, requests.RequestException):
                         self.plex = None
                         break
-                    time.sleep(5)
+                    poll_interval = min(poll_interval * 1.5, 5.0)
+
+            # Trigger metadata refresh/analysis on newly added files
+            added_files = []
+            if folder_path in self.pending_notifications:
+                added_files = self.pending_notifications[folder_path].get('added', [])
+            if not added_files and metadata and metadata.get('event_type') == 'added':
+                added_files = [folder_path]
+                
+            if added_files:
+                for fpath in added_files:
+                    self.scan_monitor_executor.submit(self._post_scan_process_file, fpath)
+
+            # Empty trash if deletion event and empty_trash behaviour is enabled
+            is_deletion = metadata and metadata.get('event_type') == 'deleted'
+            if is_deletion and self.config.get('EMPTY_TRASH'):
+                logger.info(f"🧹 Emptying Plex trash for library: {library_id}")
+                try:
+                    trash_url = f"{self.plex._baseurl}/library/sections/{library_id}/emptyTrash"
+                    trash_headers = {
+                        "X-Plex-Token": self.plex._token
+                    }
+                    trash_res = self.plex._session.put(trash_url, headers=trash_headers)
+                    trash_res.raise_for_status()
+                    logger.info(f"✅ Plex trash emptied successfully for library: {library_id}")
+                    self.history.add_event("Trash Emptied", f"Library section {library_id}", "Plex")
+                except Exception as trash_err:
+                    logger.error(f"Failed to empty Plex trash for library {library_id}: {trash_err}")
+                    if isinstance(trash_err, requests.RequestException):
+                        self.plex = None
         except Exception as e:
             logger.error(f"Failed to trigger Plex scan for {folder_path}: {e}")
             if isinstance(e, requests.RequestException):
                 self.plex = None
+        finally:
+            self.active_scan_events.pop(library_id, None)
     def get_plex_rating_key(self, file_path, library_id=None):
         """Query Plex API directly to get the rating key for a file path."""
         if not self.plex: return None
@@ -1952,5 +2120,18 @@ class PlexScanner:
                 gc.collect()
 
         threading.Thread(target=do_scan, daemon=True).start()
+
+    def __del__(self):
+        """Cleanup listener threads on deletion."""
+        try:
+            if hasattr(self, 'plex_listener') and self.plex_listener:
+                self.plex_listener.stop()
+        except:
+            pass
+        try:
+            if hasattr(self, 'jellyfin_ws_stop') and self.jellyfin_ws_stop:
+                self.jellyfin_ws_stop.set()
+        except:
+            pass
 
         
