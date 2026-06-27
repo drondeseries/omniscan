@@ -1226,8 +1226,8 @@ class PlexScanner:
                 if is_ws_active:
                     event_fired = scan_event.wait(timeout=poll_interval)
                     if event_fired:
-                        logger.info(f"⚡ [Websocket] {server_type.capitalize()} scan completion signal received for: {folder_path}")
-                        break
+                        logger.debug(f"WebSocket event received for: {folder_path}, verifying status...")
+                        scan_event.clear()
                 else:
                     time.sleep(poll_interval)
 
@@ -1411,8 +1411,8 @@ class PlexScanner:
                     # Wait for either event notification or poll timeout
                     event_fired = scan_event.wait(timeout=poll_interval)
                     if event_fired:
-                        logger.info(f"⚡ [Websocket] Plex scan completion signal received for: {folder_path}")
-                        break
+                        logger.debug(f"WebSocket event received for: {folder_path}, verifying status...")
+                        scan_event.clear()
                 else:
                     time.sleep(poll_interval)
 
