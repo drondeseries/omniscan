@@ -114,10 +114,28 @@ async def startup_event():
     main_loop = asyncio.get_running_loop()
     logging.getLogger().addHandler(ws_handler)
 
-SECRET_KEY = os.environ.get("SECRET_KEY")
-if not SECRET_KEY:
-    import secrets
-    SECRET_KEY = secrets.token_hex(32)
+def _derive_secret_key():
+    """Derive a stable SECRET_KEY from WEB_PASSWORD so sessions survive restarts.
+    Falls back to a random key only when no password is configured at all.
+    An explicit SECRET_KEY env var always takes priority."""
+    explicit = os.environ.get("SECRET_KEY")
+    if explicit:
+        return explicit
+    # Try to read WEB_PASSWORD from config.ini for a stable key
+    try:
+        import configparser
+        _cfg = configparser.ConfigParser()
+        _cfg.read('config.ini')
+        _pw = _cfg.get('web', 'password', fallback=None) or os.environ.get('WEB_PASSWORD')
+        if _pw:
+            import hashlib
+            return hashlib.sha256(f"omniscan-session-key:{_pw}".encode()).hexdigest()
+    except Exception:
+        pass
+    import secrets as _s
+    return _s.token_hex(32)
+
+SECRET_KEY = _derive_secret_key()
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY, max_age=2592000)  # 30 days session lifetime
 
 # Define paths
@@ -180,7 +198,15 @@ class SetupSubmit(BaseModel):
 class LibraryScanRequest(BaseModel):
     library_id: str
 
+def is_auth_disabled():
+    """Return True when authentication is disabled (WEB_AUTH_DISABLED=true or no password configured)."""
+    if not scanner_instance:
+        return False
+    return scanner_instance.config.get('WEB_AUTH_DISABLED', False)
+
 def get_current_user(request: Request):
+    if is_auth_disabled():
+        return "admin"
     if not is_setup_completed():
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Setup required")
     user = request.session.get("user")

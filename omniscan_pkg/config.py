@@ -89,6 +89,8 @@ def load_config(config_path='config.ini'):
     # Web Security
     cfg['WEB_USERNAME'] = get_config_val(config, 'WEB_USERNAME', 'web', 'username', 'admin')
     cfg['WEB_PASSWORD'] = get_config_val(config, 'WEB_PASSWORD', 'web', 'password')
+    # Set WEB_AUTH_DISABLED=true to allow access without login (e.g. trusted local network)
+    cfg['WEB_AUTH_DISABLED'] = get_config_val(config, 'WEB_AUTH_DISABLED', 'web', 'auth_disabled', 'false', lambda x: str(x).lower() == 'true')
 
     # Parse Directories
     directories_raw = get_config_val(config, 'SCAN_DIRECTORIES', 'scan', 'directories', '')

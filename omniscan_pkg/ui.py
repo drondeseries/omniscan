@@ -277,6 +277,11 @@ def auto_cancel(timer):
 
 
 def check_auth(request: Request, scanner):
+    if not scanner:
+        return RedirectResponse('/setup')
+    # Auth disabled: anyone can browse freely
+    if scanner.config.get('WEB_AUTH_DISABLED', False):
+        return None
     if not is_setup_completed(scanner):
         return RedirectResponse('/setup')
     if not request.session.get("user"):
@@ -1508,6 +1513,9 @@ def init_ui(app, scanner):
 
     @ui.page('/login')
     async def login_page(request: Request):
+        # Auth disabled: no login needed
+        if scanner and scanner.config.get('WEB_AUTH_DISABLED', False):
+            return RedirectResponse('/')
         if is_setup_completed(scanner) and request.session.get("user"):
             return RedirectResponse('/')
         if not is_setup_completed(scanner):
