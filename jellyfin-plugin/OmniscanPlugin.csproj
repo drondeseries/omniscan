@@ -17,12 +17,13 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- Core Jellyfin interfaces — provided at runtime, never bundled -->
-    <PackageReference Include="Jellyfin.Controller" Version="10.10.7" PrivateAssets="all" />
-    <PackageReference Include="Jellyfin.Model"      Version="10.10.7" PrivateAssets="all" />
-    <PackageReference Include="Jellyfin.Data"       Version="10.10.7" PrivateAssets="all" />
-    <!-- ASP.NET Core attributes (Authorize, ApiController …) -->
-    <PackageReference Include="Microsoft.AspNetCore.App.Ref" Version="8.0.0" PrivateAssets="all" />
+    <PackageReference Include="Jellyfin.Controller" Version="10.8.13" />
+    <PackageReference Include="Jellyfin.Model"      Version="10.8.13" />
   </ItemGroup>
 
 </Project>
