@@ -232,8 +232,8 @@ public class TargetedScanService
             }
 
             // Persist the item to the database.
-            await _libraryManager.CreateItem(resolvedItem, parent, cancellationToken)
-                .ConfigureAwait(false);
+            _libraryManager.CreateItem(resolvedItem, parent);
+
 
             _logger.LogInformation(
                 "OmniscanPlugin: created {Type} '{Name}' at {Path}",
