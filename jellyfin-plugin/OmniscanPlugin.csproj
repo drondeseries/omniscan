@@ -24,6 +24,7 @@
     <!-- Core Jellyfin interfaces — provided at runtime, never bundled -->
     <PackageReference Include="Jellyfin.Controller" Version="10.8.13" />
     <PackageReference Include="Jellyfin.Model"      Version="10.8.13" />
+    <PackageReference Include="Jellyfin.Data"       Version="10.8.13" />
   </ItemGroup>
 
 </Project>
