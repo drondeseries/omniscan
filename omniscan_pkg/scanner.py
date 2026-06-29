@@ -356,7 +356,7 @@ class PlexScanner:
     def _get_jellyfin_libraries(self):
         """Fetch libraries from Jellyfin/Emby."""
         url = f"{self.config['SERVER_URL']}/Library/VirtualFolders"
-        headers = {"X-Emby-Token": self.config['API_KEY']}
+        headers = self._get_jellyfin_headers()
         try:
             res = self.http_session.get(url, headers=headers)
             res.raise_for_status()
@@ -690,7 +690,7 @@ class PlexScanner:
             library_id, _, _ = self.get_library_id_for_path(file_path)
         if not library_id: return False
         
-        headers = {"X-Emby-Token": self.config['API_KEY'], "Accept": "application/json"}
+        headers = self._get_jellyfin_headers()
         try:
             filename = os.path.basename(file_path)
             search_url = f"{self.config['SERVER_URL']}/Items?ParentId={library_id}&Recursive=true&Fields=Path&IncludeItemTypes=Movie,Episode,Audio,MusicVideo&searchTerm={quote(filename)}"
@@ -724,7 +724,7 @@ class PlexScanner:
             while True:
                 # Fetch items in batches using StartIndex and Limit
                 url = f"{self.config['SERVER_URL']}/Items?ParentId={library_id}&Recursive=true&Fields=Path&IncludeItemTypes=Movie,Episode,Audio,MusicVideo,MusicAlbum&StartIndex={start_index}&Limit={batch_size}"
-                headers = {"X-Emby-Token": self.config['API_KEY']}
+                headers = self._get_jellyfin_headers()
                 res = self.http_session.get(url, headers=headers)
                 res.raise_for_status()
                 data = res.json()
@@ -1192,19 +1192,36 @@ class PlexScanner:
             self._trigger_cache_fill(library_id)
 
     def _trigger_jellyfin_emby_scan(self, library_id, folder_path, metadata=None):
-        """Tiered trigger: try ScanPath first, fallback to Media/Updated, and monitor completion."""
-        # Try targeted scan plugin first
+        """Tiered trigger: try ScanPath (targeted plugin) first per-file, then per-folder,
+        then fallback to Media/Updated with scan monitoring."""
+        server_type = self.config.get('SERVER_TYPE', 'jellyfin')
+        
+        # --- 1. Try targeted scan plugin on individual files first ---
+        # The targeted-scans plugin works best with exact file paths (walks tree up).
+        # Collect all files that triggered this folder scan.
+        added_files = []
+        if folder_path in self.pending_notifications:
+            added_files = list(self.pending_notifications[folder_path].get('added', []))
+        
+        if added_files:
+            all_file_scans_succeeded = True
+            for fpath in added_files:
+                if not self._try_plugin_scan(fpath, metadata):
+                    all_file_scans_succeeded = False
+            if all_file_scans_succeeded:
+                logger.info(f"✅ All {len(added_files)} file(s) targeted via plugin for: {BOLD}{folder_path}{RESET}")
+                return True
+        
+        # --- 2. Try targeted scan plugin on the folder path ---
         if self._try_plugin_scan(folder_path, metadata):
             return True
         
-        server_type = self.config.get('SERVER_TYPE', 'jellyfin')
-        
+        # --- 3. Fallback to standard Library/Media/Updated + scan monitoring ---
         # Setup WebSocket Event if listener is active
         scan_event = threading.Event()
         with self.active_jellyfin_scan_lock:
             self.active_jellyfin_scan_events[folder_path] = scan_event
             
-        # Fallback to standard behavior
         try:
             self._fallback_trigger_scan(folder_path, metadata)
             
@@ -1242,15 +1259,11 @@ class PlexScanner:
                     poll_interval = min(poll_interval * 1.5, 5.0)
 
             # Trigger metadata refresh/analysis on newly added files
-            added_files = []
-            if folder_path in self.pending_notifications:
-                added_files = self.pending_notifications[folder_path].get('added', [])
-            if not added_files and metadata and metadata.get('event_type') == 'added':
-                added_files = [folder_path]
-                
             if added_files:
                 for fpath in added_files:
                     self.scan_monitor_executor.submit(self._post_scan_process_file, fpath)
+            elif metadata and metadata.get('event_type') == 'added':
+                self.scan_monitor_executor.submit(self._post_scan_process_file, folder_path)
             
             return True
         except Exception as e:
@@ -1260,37 +1273,61 @@ class PlexScanner:
             with self.active_jellyfin_scan_lock:
                 self.active_jellyfin_scan_events.pop(folder_path, None)
 
-    def _try_plugin_scan(self, folder_path, metadata):
-        """Try to use the Targeted Scan plugin (ScanPath)."""
-        url = f"{self.config['SERVER_URL']}/Library/ScanPath"
-        headers = {
-            "X-Emby-Token": self.config['API_KEY'],
-            "Content-Type": "application/json"
+    def _get_jellyfin_headers(self):
+        """Build the standard Jellyfin/Emby API headers.
+        
+        Sends both X-Emby-Token and the MediaBrowser Authorization header because
+        some Jellyfin versions (≥10.9) require the latter while older ones and Emby
+        still accept the former.  Sending both is always safe.
+        """
+        token = self.config['API_KEY']
+        return {
+            "X-Emby-Token": token,
+            "Authorization": f'MediaBrowser Token="{token}"',
+            "Accept": "application/json",
+            "Content-Type": "application/json",
         }
-        payload = {"Path": folder_path}
+
+    def _try_plugin_scan(self, path, metadata):
+        """Try to use the Targeted Scan plugin (POST /Library/ScanPath).
+        
+        Accepts either a file path or a folder path.  The plugin walks the
+        directory tree upward to find the nearest known ancestor, then creates
+        any missing items (Series → Season → Episode) in one shot.
+        Returns True only when the server confirms an ItemId was created/found.
+        """
+        url = f"{self.config['SERVER_URL']}/Library/ScanPath"
+        headers = self._get_jellyfin_headers()
+        payload = {"Path": path}
         
         try:
-            response = self.http_session.post(url, json=payload, headers=headers)
+            response = self.http_session.post(url, json=payload, headers=headers, timeout=30)
+            if response.status_code == 404:
+                # Plugin not installed — don't log an error, just fall through silently
+                logger.debug("Targeted Scan plugin not found (404). Falling back to standard scan.")
+                return False
             response.raise_for_status()
             data = response.json()
             
-            item_id = data.get('ItemId')
-            if item_id:
-                logger.info(f"🔎 Targeted plugin scan successful for: {BOLD}{folder_path}{RESET} (ItemId: {item_id})")
-                # Immediately trigger refresh to bypass sleep
-                self.refresh_jellyfin_item(item_id)
+            item_id = data.get('ItemId') or data.get('item_id')
+            status = data.get('Status') or data.get('status', '')
+            if item_id or status.lower() in ('created', 'existing', 'found', 'ok', 'success'):
+                logger.info(
+                    f"🔎 Targeted plugin scan successful for: {BOLD}{path}{RESET}"
+                    + (f" (ItemId: {item_id})" if item_id else f" (Status: {status})")
+                )
+                if item_id:
+                    # Kick off a metadata refresh immediately so artwork appears fast
+                    self.scan_monitor_executor.submit(self.refresh_jellyfin_item, item_id)
                 return True
         except Exception as e:
-            logger.debug(f"Targeted plugin scan failed, falling back: {e}")
+            logger.debug(f"Targeted plugin scan failed for {path}: {e}")
         return False
 
     def _fallback_trigger_scan(self, folder_path, metadata=None):
-        """Fallback to standard Jellyfin/Emby scan endpoint."""
+        """Fallback to standard Jellyfin/Emby Library/Media/Updated endpoint."""
         url = f"{self.config['SERVER_URL']}/Library/Media/Updated"
-        headers = {
-            "X-Emby-Token": self.config['API_KEY'],
-            "Content-Type": "application/json"
-        }
+        headers = self._get_jellyfin_headers()
         
         # Determine the update type (default to "Created" for safety)
         update_type = "Created"
@@ -1322,10 +1359,7 @@ class PlexScanner:
     def _is_jellyfin_emby_scanning(self):
         """Check if Jellyfin/Emby is currently scanning the media library by querying scheduled tasks."""
         url = f"{self.config['SERVER_URL']}/ScheduledTasks"
-        headers = {
-            "X-Emby-Token": self.config['API_KEY'],
-            "Accept": "application/json"
-        }
+        headers = self._get_jellyfin_headers()
         try:
             response = self.http_session.get(url, headers=headers, timeout=5)
             if response.status_code == 200:
@@ -1536,7 +1570,7 @@ class PlexScanner:
     def get_jellyfin_item_id(self, file_path):
         """Query Jellyfin/Emby API directly to get the item ID for a file path."""
         url = f"{self.config['SERVER_URL']}/Items"
-        headers = {"X-Emby-Token": self.config['API_KEY'], "Accept": "application/json"}
+        headers = self._get_jellyfin_headers()
         params = {"Path": file_path, "Fields": "Path"}
         try:
             res = self.http_session.get(url, headers=headers, params=params, timeout=10)
@@ -1566,7 +1600,7 @@ class PlexScanner:
         """Trigger metadata refresh on Jellyfin/Emby for a specific item ID."""
         if not item_id: return
         url = f"{self.config['SERVER_URL']}/Items/{item_id}/Refresh"
-        headers = {"X-Emby-Token": self.config['API_KEY']}
+        headers = self._get_jellyfin_headers()
         params = {
             "MetadataRefreshMode": "FullRefresh",
             "ImageRefreshMode": "FullRefresh",

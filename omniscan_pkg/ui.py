@@ -1151,7 +1151,9 @@ def init_ui(app, scanner):
             'mention_roles': ",".join(c.get('DISCORD_MENTION_ROLES', [])),
             'mention_everyone': c.get('DISCORD_MENTION_EVERYONE', False),
             'mention_here': c.get('DISCORD_MENTION_HERE', False),
-            'mention_events': ",".join(c.get('DISCORD_MENTION_EVENTS', ['corrupt', 'stuck']))
+            'mention_events': ",".join(c.get('DISCORD_MENTION_EVENTS', ['corrupt', 'stuck'])),
+            'web_username': c.get('WEB_USERNAME', 'admin'),
+            'auth_disabled': c.get('WEB_AUTH_DISABLED', False),
         }
 
         def section_header(title, icon, subtitle=None):
@@ -1335,7 +1337,23 @@ def init_ui(app, scanner):
                 with ui.row().classes('w-full gap-4 flex-wrap items-center'):
                     deletion_threshold = ui.number('Mass Deletion Limit (%)', value=values['deletion_threshold']).classes('grow').props('outlined dense')
 
-            # ─── SECTION 5: Notifications ──────────────────────────────────────
+            # ─── SECTION 5: Web Security ────────────────────────────────────────
+            with ui.card().classes('glass-card p-6 rounded-2xl w-full flex flex-col gap-5'):
+                section_header('Web Security', 'fa-shield-halved', 'Authentication and access control')
+
+                auth_disabled = ui.switch('Disable Authentication (no login required)', value=values['auth_disabled'])
+                ui.label(
+                    '⚠ Only enable on a trusted local network. Anyone with network access can reach the UI.'
+                ).classes('text-[10px] text-amber-400/70 font-semibold')
+
+                ui.separator().classes('opacity-5')
+                ui.label('Change Credentials').classes('text-[10px] font-black text-slate-500 uppercase tracking-widest')
+                with ui.row().classes('w-full gap-4 flex-wrap'):
+                    web_username = ui.input('Username', value=values['web_username']).classes('grow').props('outlined dense')
+                    web_password = ui.input('New Password (leave blank to keep current)', value='').classes('grow').props('outlined dense type=password')
+                    web_password_confirm = ui.input('Confirm New Password', value='').classes('grow').props('outlined dense type=password')
+
+            # ─── SECTION 6: Notifications ──────────────────────────────────────
             with ui.card().classes('glass-card p-6 rounded-2xl w-full flex flex-col gap-5'):
                 section_header('Discord Notifications', 'fa-bell', 'Get notified on scan events via Discord webhook')
 
@@ -1446,6 +1464,16 @@ def init_ui(app, scanner):
                     c['DISCORD_MENTION_HERE'] = mention_here.value
                     c['DISCORD_MENTION_EVENTS'] = [e.strip().lower() for e in mention_events.value.split(',') if e.strip()]
 
+                    # Web Security
+                    new_pw = web_password.value.strip()
+                    if new_pw:
+                        if new_pw != web_password_confirm.value.strip():
+                            ui.notify('Passwords do not match!', type='negative')
+                            return
+                        c['WEB_PASSWORD'] = new_pw
+                    c['WEB_USERNAME'] = web_username.value.strip() or 'admin'
+                    c['WEB_AUTH_DISABLED'] = auth_disabled.value
+
                     c['PATH_REWRITES'] = []
                     for line in path_rewrites.value.replace(',', '\n').split('\n'):
                         line = line.strip()
@@ -1496,6 +1524,10 @@ def init_ui(app, scanner):
                         cfg.set('ignore', 'patterns', ','.join(c['IGNORE_PATTERNS']))
                         cfg.set('logs', 'loglevel', str(c['LOG_LEVEL']))
                         cfg.set('rewrite', 'mappings', ','.join([f'{src}:{dst}' for src, dst in c['PATH_REWRITES']]))
+                        if not cfg.has_section('web'): cfg.add_section('web')
+                        cfg.set('web', 'username', str(c['WEB_USERNAME']))
+                        cfg.set('web', 'password', str(c['WEB_PASSWORD']))
+                        cfg.set('web', 'auth_disabled', str(c['WEB_AUTH_DISABLED']).lower())
 
                         with open('config.ini', 'w') as f: cfg.write(f)
 

@@ -480,7 +480,8 @@ async def test_conn(s: SettingsUpdate, u: str = Depends(get_current_user)):
             plex = PlexServer(s.plex_server, rt)
             return {"status": "success", "message": f"Linked to {plex.friendlyName}"}
         else:
-            r = requests.get(f"{ru}/System/Info", headers={"X-Emby-Token": rk}, timeout=5)
+            _h = {"X-Emby-Token": rk, "Authorization": f'MediaBrowser Token="{rk}"', "Accept": "application/json"}
+            r = requests.get(f"{ru}/System/Info", headers=_h, timeout=5)
             r.raise_for_status()
             return {"status": "success", "message": f"Linked to {s.server_type.capitalize()}"}
     except Exception as e: return JSONResponse({"status": "error", "message": str(e)}, status_code=400)
@@ -494,7 +495,8 @@ async def test_conn_unauth(s: SettingsUpdate):
             plex = PlexServer(s.plex_server, s.plex_token)
             return {"status": "success", "message": f"Linked to {plex.friendlyName}"}
         else:
-            r = requests.get(f"{s.server_url}/System/Info", headers={"X-Emby-Token": s.api_key}, timeout=5)
+            _h = {"X-Emby-Token": s.api_key, "Authorization": f'MediaBrowser Token="{s.api_key}"', "Accept": "application/json"}
+            r = requests.get(f"{s.server_url}/System/Info", headers=_h, timeout=5)
             r.raise_for_status()
             return {"status": "success", "message": f"Linked to {s.server_type.capitalize()}"}
     except Exception as e: return JSONResponse({"status": "error", "message": str(e)}, status_code=400)
@@ -790,7 +792,7 @@ async def check_conn_status(u: str = Depends(get_current_user)):
             p = PlexServer(url, token)
             return {"status": "success", "message": f"{p.friendlyName}", "server": "Plex"}
         else:
-            h = {"X-Emby-Token": token}
+            h = {"X-Emby-Token": token, "Authorization": f'MediaBrowser Token="{token}"', "Accept": "application/json"}
             r = requests.get(f"{url}/System/Info", headers=h, timeout=5)
             r.raise_for_status()
             return {"status": "success", "message": "Online", "server": st.capitalize()}

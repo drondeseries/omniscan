@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <AssemblyName>OmniscanEmbyPlugin</AssemblyName>
+    <RootNamespace>OmniscanEmbyPlugin</RootNamespace>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <LangVersion>latest</LangVersion>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <FileVersion>1.0.0.0</FileVersion>
+    <Optimize>true</Optimize>
+  </PropertyGroup>
+
+  <!-- Note: Emby does not distribute SDK packages on public NuGet.
+       Building this plugin requires placing the following DLLs from your
+       Emby installation (e.g. under system/ or bin/) into a local `sdk/` folder:
+       - MediaBrowser.Common.dll
+       - MediaBrowser.Controller.dll
+       - MediaBrowser.Model.dll
+  -->
+  <ItemGroup>
+    <Reference Include="MediaBrowser.Common">
+      <HintPath>sdk/MediaBrowser.Common.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="MediaBrowser.Controller">
+      <HintPath>sdk/MediaBrowser.Controller.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="MediaBrowser.Model">
+      <HintPath>sdk/MediaBrowser.Model.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>

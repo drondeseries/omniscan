@@ -140,7 +140,25 @@ Omniscan exposes a unified, authenticated webhook endpoint for Sonarr, Radarr, L
 
 ---
 
+## ⚡ Targeted Scan Plugins (Jellyfin & Emby)
+
+To avoid triggering slow full-library scans, Omniscan supports targeted library scanning via custom plugins for Jellyfin and Emby. 
+
+When a new media file is detected, Omniscan contacts the plugin, which walks the directory tree upward to find the nearest known folder, and then creates the missing library items (e.g. Series → Season → Episode or Movie) instantly in one shot.
+
+### Features
+- **Instant Imports** — Newly added files appear in your library within seconds.
+- **Zero Database Lockup** — Bypass full library directory validation and database lockups.
+- **Auto-Fallbacks** — If the plugin is not installed, Omniscan automatically falls back to standard media-updated notifications.
+
+For installation instructions, project structure, and configurations:
+- 🌐 [Jellyfin Plugin README](file:///opt/altmount/github/omniscan/jellyfin-plugin/README.md)
+- 🌐 [Emby Plugin README](file:///opt/altmount/github/omniscan/emby-plugin/README.md) (coming soon, or use the compatible targeted-scans plugin)
+
+---
+
 ## 🖥️ Dashboard
+
 
 | Card | Description |
 |---|---|

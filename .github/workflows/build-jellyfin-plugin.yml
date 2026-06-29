@@ -1,0 +1,63 @@
+name: Build Jellyfin Plugin
+
+on:
+  push:
+    paths:
+      - 'jellyfin-plugin/**'
+    branches: [ main, master ]
+  pull_request:
+    paths:
+      - 'jellyfin-plugin/**'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: jellyfin-plugin
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build --configuration Release --no-restore
+
+      - name: Publish (single DLL)
+        run: |
+          dotnet publish --configuration Release --no-build \
+            --output ../dist/jellyfin-plugin
+
+      - name: Zip artifact
+        run: |
+          cd ../dist/jellyfin-plugin
+          zip -j ../../dist/omniscan-jellyfin-plugin.zip OmniscanPlugin.dll
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: omniscan-jellyfin-plugin
+          path: dist/omniscan-jellyfin-plugin.zip
+          retention-days: 30
+
+      - name: Upload release asset (on push to main)
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: plugin-latest
+          name: "Omniscan Jellyfin Plugin (latest)"
+          body: "Auto-built Jellyfin plugin DLL for Omniscan."
+          files: dist/omniscan-jellyfin-plugin.zip
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
