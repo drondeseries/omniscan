@@ -1,8 +1,9 @@
-import time
-import os
 import logging
-from watchdog.observers import Observer
+import os
+import time
+
 from watchdog.events import FileSystemEventHandler
+from watchdog.observers import Observer
 
 logger = logging.getLogger(__name__)
 

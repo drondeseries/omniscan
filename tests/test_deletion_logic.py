@@ -1,5 +1,6 @@
 import unittest
 from unittest.mock import MagicMock, patch
+
 from omniscan_pkg.scanner import PlexScanner
 
 

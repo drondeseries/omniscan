@@ -1,44 +1,47 @@
-import os
-import time
-import logging
-import json
 import asyncio
-import re
+import logging
+import os
 import pathlib
-import requests
+import re
 import secrets
+import time
 from collections import deque
 from datetime import datetime
-from typing import Optional, List
+from typing import List, Optional
+
+import requests
 from fastapi import (
-    FastAPI,
-    Request,
     Depends,
-    HTTPException,
-    status,
+    FastAPI,
     Form,
+    HTTPException,
+    Request,
     WebSocket,
     WebSocketDisconnect,
+    status,
 )
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from starlette.middleware.sessions import SessionMiddleware
+from nicegui import app as nicegui_app
+from nicegui import ui
 from pydantic import BaseModel
-from nicegui import ui, app as nicegui_app
+from starlette.middleware.sessions import SessionMiddleware
 
 nicegui_app.config.socket_io_js_transports = ["polling", "websocket"]
-from plexapi.server import PlexServer
-from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
-from .config import get_webhook_token, load_config, normalize_emby_url
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
-from .webhook_parser import parse_webhook
+from plexapi.server import PlexServer
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+
+from .config import get_webhook_token, normalize_emby_url
 from .ui import init_ui
+from .webhook_parser import parse_webhook
 
 logger = logging.getLogger(__name__)
 
 # Monkeypatch python-engineio to prevent KeyError: 'REQUEST_METHOD' on client disconnects during connection setup.
 try:
     import sys
+
     import engineio.async_drivers.asgi
 
     original_translate_request = engineio.async_drivers.asgi.translate_request
@@ -78,9 +81,10 @@ except Exception as e:
 
 # Monkeypatch python-engineio handle_request to prevent KeyError: 'Session is disconnected' / 'Session not found' during concurrent disconnects.
 try:
-    import engineio.async_server
     import inspect
     import urllib.parse
+
+    import engineio.async_server
 
     original_handle_request = engineio.async_server.AsyncServer.handle_request
 
@@ -139,9 +143,9 @@ def _derive_secret_key():
     try:
         import configparser
 
-        _cfg = configparser.ConfigParser()
-        _cfg.read("config.ini")
-        _pw = _cfg.get("web", "password", fallback=None) or os.environ.get(
+        cfg = configparser.ConfigParser()
+        cfg.read("config.ini")
+        _pw = cfg.get("web", "password", fallback=None) or os.environ.get(
             "WEB_PASSWORD"
         )
         if _pw:
@@ -307,7 +311,7 @@ class ConnectionManager:
         for connection in self.active_connections:
             try:
                 await connection.send_text(message)
-            except:
+            except Exception:
                 pass
 
 
@@ -645,6 +649,8 @@ async def setup_submit(r: SetupSubmit, request: Request):
     ]
 
     try:
+        import configparser
+
         cfg = configparser.ConfigParser()
         cfg.read("config.ini")
 
@@ -730,6 +736,8 @@ async def update_settings(s: SettingsUpdate, u: str = Depends(get_current_user))
             c["PATH_REWRITES"].append((parts[0].strip(), parts[1].strip()))
 
     try:
+        import configparser
+
         cfg = configparser.ConfigParser()
         cfg.read("config.ini")
         for sec in [
@@ -990,8 +998,9 @@ async def test_webhook(data: dict, u: str = Depends(get_current_user)):
         return JSONResponse({"error": "Invalid URL"}, status_code=400)
 
     try:
+        from discord import Color, Embed
+
         from .notifications import send_discord_webhook_sync
-        from discord import Embed, Color
 
         embed = Embed(
             title="✅ Omniscan Test Message",
