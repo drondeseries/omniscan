@@ -6,13 +6,18 @@ import logging
 from collections import defaultdict
 from datetime import datetime
 from contextlib import closing
-from .notifications import truncate_field_value, send_discord_webhook_sync, format_file_list
+from .notifications import (
+    truncate_field_value,
+    send_discord_webhook_sync,
+    format_file_list,
+)
 from discord import Embed, Color
 
 logger = logging.getLogger(__name__)
 
+
 class StuckFileTracker:
-    def __init__(self, db_file='history.db', config=None):
+    def __init__(self, db_file="history.db", config=None):
         self.db_file = db_file
         self.config = config or {}
         self.max_retries = 3
@@ -26,16 +31,16 @@ class StuckFileTracker:
             try:
                 with closing(sqlite3.connect(self.db_file)) as conn:
                     # Enable WAL mode for better concurrency
-                    conn.execute('PRAGMA journal_mode=WAL;')
+                    conn.execute("PRAGMA journal_mode=WAL;")
                     with conn:
-                        conn.execute('''
+                        conn.execute("""
                             CREATE TABLE IF NOT EXISTS stuck_files (
                                 path TEXT PRIMARY KEY,
                                 attempts INTEGER DEFAULT 0,
                                 last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                             )
-                        ''')
-                        conn.execute('''
+                        """)
+                        conn.execute("""
                             CREATE TABLE IF NOT EXISTS events (
                                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -44,36 +49,56 @@ class StuckFileTracker:
                                 status TEXT,
                                 metadata TEXT
                             )
-                        ''')
+                        """)
                         # Migration: Add metadata column if it doesn't exist
-                        columns = [info[1] for info in conn.execute('PRAGMA table_info(events)').fetchall()]
-                        if 'metadata' not in columns:
-                            conn.execute('ALTER TABLE events ADD COLUMN metadata TEXT')
-                            logger.info("Database migrated: added 'metadata' column to 'events' table.")
-                    
+                        columns = [
+                            info[1]
+                            for info in conn.execute(
+                                "PRAGMA table_info(events)"
+                            ).fetchall()
+                        ]
+                        if "metadata" not in columns:
+                            conn.execute("ALTER TABLE events ADD COLUMN metadata TEXT")
+                            logger.info(
+                                "Database migrated: added 'metadata' column to 'events' table."
+                            )
+
                     # Cache stuck paths in memory
                     cursor = conn.cursor()
-                    cursor.execute('SELECT path FROM stuck_files')
+                    cursor.execute("SELECT path FROM stuck_files")
                     self.stuck_paths = {row[0] for row in cursor.fetchall()}
             except Exception as e:
                 logger.error(f"Failed to init DB: {e}")
 
     def add_event(self, event_type, details, status, metadata=None):
         """Add an event to the history log, optionally storing rich metadata."""
-        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         metadata_json = json.dumps(metadata) if metadata else None
         with self.lock:
             try:
                 with closing(sqlite3.connect(self.db_file)) as conn:
                     with conn:
-                        conn.execute('INSERT INTO events (timestamp, event_type, details, status, metadata) VALUES (?, ?, ?, ?, ?)', (timestamp, event_type, details, status, metadata_json))
+                        conn.execute(
+                            "INSERT INTO events (timestamp, event_type, details, status, metadata) VALUES (?, ?, ?, ?, ?)",
+                            (timestamp, event_type, details, status, metadata_json),
+                        )
 
                         # Prune old events and stuck files older than cleanup_days
                         self.prune_counter += 1
                         if self.prune_counter >= 100:
-                            cleanup_days = self.config.get('CLEANUP_DAYS', 10) if hasattr(self, 'config') else 10
-                            conn.execute("DELETE FROM events WHERE timestamp < datetime('now', ?)", (f"-{cleanup_days} days",))
-                            conn.execute("DELETE FROM stuck_files WHERE last_seen < datetime('now', ?)", (f"-{cleanup_days} days",))
+                            cleanup_days = (
+                                self.config.get("CLEANUP_DAYS", 10)
+                                if hasattr(self, "config")
+                                else 10
+                            )
+                            conn.execute(
+                                "DELETE FROM events WHERE timestamp < datetime('now', ?)",
+                                (f"-{cleanup_days} days",),
+                            )
+                            conn.execute(
+                                "DELETE FROM stuck_files WHERE last_seen < datetime('now', ?)",
+                                (f"-{cleanup_days} days",),
+                            )
                             self.prune_counter = 0
             except Exception as e:
                 logger.error(f"DB Error adding event: {e}")
@@ -86,9 +111,15 @@ class StuckFileTracker:
                     cursor = conn.cursor()
                     if search:
                         search_term = f"%{search}%"
-                        cursor.execute('SELECT timestamp, event_type, details, status FROM events WHERE details LIKE ? OR event_type LIKE ? ORDER BY id DESC LIMIT ? OFFSET ?', (search_term, search_term, limit, offset))
+                        cursor.execute(
+                            "SELECT timestamp, event_type, details, status FROM events WHERE details LIKE ? OR event_type LIKE ? ORDER BY id DESC LIMIT ? OFFSET ?",
+                            (search_term, search_term, limit, offset),
+                        )
                     else:
-                        cursor.execute('SELECT timestamp, event_type, details, status FROM events ORDER BY id DESC LIMIT ? OFFSET ?', (limit, offset))
+                        cursor.execute(
+                            "SELECT timestamp, event_type, details, status FROM events ORDER BY id DESC LIMIT ? OFFSET ?",
+                            (limit, offset),
+                        )
                     return cursor.fetchall()
             except Exception as e:
                 logger.error(f"DB Error fetching history: {e}")
@@ -104,17 +135,25 @@ class StuckFileTracker:
             try:
                 with closing(sqlite3.connect(self.db_file)) as conn:
                     cursor = conn.cursor()
-                    cursor.execute('SELECT attempts FROM stuck_files WHERE path = ?', (file_path,))
+                    cursor.execute(
+                        "SELECT attempts FROM stuck_files WHERE path = ?", (file_path,)
+                    )
                     row = cursor.fetchone()
-                    
+
                     with conn:
                         if row:
                             attempts = row[0] + 1
-                            cursor.execute('UPDATE stuck_files SET attempts = ?, last_seen = CURRENT_TIMESTAMP WHERE path = ?', (attempts, file_path))
+                            cursor.execute(
+                                "UPDATE stuck_files SET attempts = ?, last_seen = CURRENT_TIMESTAMP WHERE path = ?",
+                                (attempts, file_path),
+                            )
                         else:
                             attempts = 1
-                            cursor.execute('INSERT INTO stuck_files (path, attempts) VALUES (?, ?)', (file_path, attempts))
-                    
+                            cursor.execute(
+                                "INSERT INTO stuck_files (path, attempts) VALUES (?, ?)",
+                                (file_path, attempts),
+                            )
+
                 self.stuck_paths.add(file_path)
                 return attempts > self.max_retries
             except Exception as e:
@@ -129,7 +168,9 @@ class StuckFileTracker:
             try:
                 with closing(sqlite3.connect(self.db_file)) as conn:
                     with conn:
-                        conn.execute('DELETE FROM stuck_files WHERE path = ?', (file_path,))
+                        conn.execute(
+                            "DELETE FROM stuck_files WHERE path = ?", (file_path,)
+                        )
                 self.stuck_paths.discard(file_path)
             except Exception as e:
                 logger.error(f"DB Error clearing {file_path}: {e}")
@@ -140,7 +181,9 @@ class StuckFileTracker:
             try:
                 with closing(sqlite3.connect(self.db_file)) as conn:
                     cursor = conn.cursor()
-                    cursor.execute('SELECT path, attempts, last_seen FROM stuck_files ORDER BY last_seen DESC')
+                    cursor.execute(
+                        "SELECT path, attempts, last_seen FROM stuck_files ORDER BY last_seen DESC"
+                    )
                     return cursor.fetchall()
             except Exception as e:
                 logger.error(f"DB Error fetching stuck files: {e}")
@@ -154,8 +197,8 @@ class StuckFileTracker:
                 with closing(sqlite3.connect(self.db_file)) as conn:
                     cursor = conn.cursor()
                     cursor.execute(
-                        'SELECT path, attempts, last_seen FROM stuck_files WHERE attempts >= ? ORDER BY last_seen DESC',
-                        (self.max_retries,)
+                        "SELECT path, attempts, last_seen FROM stuck_files WHERE attempts >= ? ORDER BY last_seen DESC",
+                        (self.max_retries,),
                     )
                     return cursor.fetchall()
             except Exception as e:
@@ -168,12 +211,14 @@ class StuckFileTracker:
             try:
                 with closing(sqlite3.connect(self.db_file)) as conn:
                     cursor = conn.cursor()
-                    cursor.execute('SELECT COUNT(*) FROM stuck_files WHERE attempts >= ?', (self.max_retries,))
+                    cursor.execute(
+                        "SELECT COUNT(*) FROM stuck_files WHERE attempts >= ?",
+                        (self.max_retries,),
+                    )
                     return cursor.fetchone()[0]
             except Exception as e:
                 logger.error(f"DB Error counting stuck files: {e}")
                 return 0
-
 
     def get_corrupt_count(self):
         """Return the total number of corrupt files logged."""
@@ -181,7 +226,9 @@ class StuckFileTracker:
             try:
                 with closing(sqlite3.connect(self.db_file)) as conn:
                     cursor = conn.cursor()
-                    cursor.execute("SELECT COUNT(*) FROM events WHERE event_type = 'Corrupt'")
+                    cursor.execute(
+                        "SELECT COUNT(*) FROM events WHERE event_type = 'Corrupt'"
+                    )
                     return cursor.fetchone()[0]
             except Exception as e:
                 logger.error(f"DB Error fetching corrupt count: {e}")
@@ -193,7 +240,7 @@ class StuckFileTracker:
             try:
                 with closing(sqlite3.connect(self.db_file)) as conn:
                     with conn:
-                        conn.execute('DELETE FROM stuck_files')
+                        conn.execute("DELETE FROM stuck_files")
                 self.stuck_paths.clear()
                 return True
             except Exception as e:
@@ -206,7 +253,7 @@ class StuckFileTracker:
             try:
                 with closing(sqlite3.connect(self.db_file)) as conn:
                     with conn:
-                        conn.execute('DELETE FROM events')
+                        conn.execute("DELETE FROM events")
                 return True
             except Exception as e:
                 logger.error(f"DB Error clearing all events: {e}")
@@ -260,15 +307,15 @@ class RunStats:
         return datetime.now() - self.start_time
 
     def send_discord_summary(self):
-        if self.config.get('DRY_RUN'):
+        if self.config.get("DRY_RUN"):
             logger.info("[DRY RUN] 📢 Would send Discord summary notification")
             return
 
-        if not self.config['NOTIFICATIONS_ENABLED']:
+        if not self.config["NOTIFICATIONS_ENABLED"]:
             logger.info("📢 Notifications are disabled in config.ini")
             return
-            
-        webhook_url = self.config['DISCORD_WEBHOOK_URL']
+
+        webhook_url = self.config["DISCORD_WEBHOOK_URL"]
         if not webhook_url:
             logger.warning("Discord webhook URL not configured. Skipping notification.")
             return
@@ -278,14 +325,14 @@ class RunStats:
             embed = Embed(
                 title="📊 Omniscan Scan Summary",
                 color=Color.blue(),
-                timestamp=datetime.now()
+                timestamp=datetime.now(),
             )
 
             # Add overview
             embed.description = (
-               f"**Scan Complete**\n"
-               f"Found **{self.total_missing}** missing items\n"
-               f"Scanned **{self.total_scanned}** total files"
+                f"**Scan Complete**\n"
+                f"Found **{self.total_missing}** missing items\n"
+                f"Scanned **{self.total_scanned}** total files"
             )
 
             # Add broken symlinks summary if any
@@ -293,24 +340,28 @@ class RunStats:
                 embed.add_field(
                     name="⚠️ Issues Detected",
                     value=f"Broken Symlinks Skipped: **{self.broken_symlinks}**",
-                    inline=False
+                    inline=False,
                 )
 
             # Add stuck items summary
             if self.stuck_items:
                 embed.add_field(
                     name=f"⛔ Stuck Files ({len(self.stuck_items)})",
-                    value=format_file_list(self.stuck_items, prefix="! ", code_block=True),
-                    inline=False
+                    value=format_file_list(
+                        self.stuck_items, prefix="! ", code_block=True
+                    ),
+                    inline=False,
                 )
 
             # Add corrupt items summary
             if self.corrupt_items:
-                corrupt_list = [f"{path} ({reason})" for path, reason in self.corrupt_items]
+                corrupt_list = [
+                    f"{path} ({reason})" for path, reason in self.corrupt_items
+                ]
                 embed.add_field(
                     name=f"❌ Corrupt Files ({len(self.corrupt_items)})",
                     value=format_file_list(corrupt_list, prefix="x ", code_block=True),
-                    inline=False
+                    inline=False,
                 )
 
             # Add library-specific stats
@@ -318,63 +369,75 @@ class RunStats:
                 lib_name = library or "Unknown Library"
                 embed.add_field(
                     name=f"📁 {lib_name} ({len(items)})",
-                    value=format_file_list(items, max_items=5, prefix="• ", code_block=True),
-                    inline=False
+                    value=format_file_list(
+                        items, max_items=5, prefix="• ", code_block=True
+                    ),
+                    inline=False,
                 )
 
             # Add footer
-            embed.set_footer(text=f"Omniscan Media Monitor • Run Time: {self.get_run_time()}")
+            embed.set_footer(
+                text=f"Omniscan Media Monitor • Run Time: {self.get_run_time()}"
+            )
 
             # Determine event_type for Discord mentions
-            event_type = 'update'
+            event_type = "update"
             if self.stuck_items:
-                event_type = 'stuck'
+                event_type = "stuck"
             if self.corrupt_items:
-                event_type = 'corrupt'
+                event_type = "corrupt"
 
             # Send webhook
-            if send_discord_webhook_sync(webhook_url, embed, self.config, event_type=event_type):
+            if send_discord_webhook_sync(
+                webhook_url, embed, self.config, event_type=event_type
+            ):
                 logger.info("✅ Discord notification sent successfully")
 
         except Exception as e:
             logger.error(f"Failed to send Discord notification: {str(e)}")
 
     def send_discord_pending(self, folders_count):
-        if self.config.get('DRY_RUN'):
+        if self.config.get("DRY_RUN"):
             logger.info("[DRY RUN] 📢 Would send pending scan notification")
             return
 
-        if not self.config['NOTIFICATIONS_ENABLED']:
+        if not self.config["NOTIFICATIONS_ENABLED"]:
             return
-            
-        webhook_url = self.config['DISCORD_WEBHOOK_URL']
+
+        webhook_url = self.config["DISCORD_WEBHOOK_URL"]
         if not webhook_url:
             return
 
         try:
-            est_seconds = folders_count * 10 
+            est_seconds = folders_count * 10
             est_minutes = est_seconds // 60
             est_sec_remainder = est_seconds % 60
-            est_str = f"{est_minutes}m {est_sec_remainder}s" if est_minutes > 0 else f"{est_seconds}s"
+            est_str = (
+                f"{est_minutes}m {est_sec_remainder}s"
+                if est_minutes > 0
+                else f"{est_seconds}s"
+            )
 
             embed = Embed(
                 title="🔍 Scan Started",
                 description=f"Scanning **{folders_count}** folders for missing items.\nEstimated time: **{est_str}**",
                 color=Color.orange(),
-                timestamp=datetime.now()
+                timestamp=datetime.now(),
             )
 
             embed.add_field(
                 name="📊 Overview",
                 value=f"Found **{self.total_missing}** missing items.",
-                inline=False
+                inline=False,
             )
 
             for library, items in self.missing_items.items():
                 embed.add_field(
                     name=f"📁 {library} ({len(items)} items)",
-                    value=format_file_list(items, max_items=10, prefix="• ", code_block=True),
-                    inline=False
+                    value=format_file_list(
+                        items, max_items=10, prefix="• ", code_block=True
+                    ),
+                    inline=False,
                 )
 
             embed.set_footer(text="Omniscan Media Monitor")
