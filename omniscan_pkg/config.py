@@ -1,6 +1,6 @@
-import os
 import configparser
 import logging
+import os
 
 
 def get_config_val(

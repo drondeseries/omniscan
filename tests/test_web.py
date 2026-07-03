@@ -1,8 +1,10 @@
 import unittest
 from unittest.mock import MagicMock, patch
+
 from fastapi.testclient import TestClient
-from omniscan_pkg.web import app, set_scanner
+
 from omniscan_pkg.config import get_webhook_token
+from omniscan_pkg.web import app, set_scanner
 
 
 class TestWebHookAPI(unittest.TestCase):
@@ -63,6 +65,7 @@ class TestWebHookAPI(unittest.TestCase):
     def test_engineio_session_disconnected_handling(self):
         import asyncio
         from unittest.mock import AsyncMock
+
         import engineio.async_server
 
         async def run_test():
