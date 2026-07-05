@@ -206,12 +206,13 @@ def main():
         watcher_thread.start()
 
     # Default: Scheduled Mode
-    logger.info(f"Will run every {BOLD}{config['RUN_INTERVAL']}{RESET} hours")
+    interval_unit = config.get("RUN_INTERVAL_UNIT", "hours").lower()
+    logger.info(f"Will run every {BOLD}{config['RUN_INTERVAL']}{RESET} {interval_unit}")
 
     if config.get("RUN_ON_STARTUP") and not (args.watch or config.get("WATCH_MODE")):
         scanner.run_scan()
 
-    if config["START_TIME"]:
+    if config["START_TIME"] and interval_unit == "hours":
         try:
             start_hour, start_minute = map(int, config["START_TIME"].split(":"))
             for i in range(0, 24, config["RUN_INTERVAL"]):
@@ -221,7 +222,10 @@ def main():
         except ValueError:
             schedule.every(config["RUN_INTERVAL"]).hours.do(scanner.run_scan)
     else:
-        schedule.every(config["RUN_INTERVAL"]).hours.do(scanner.run_scan)
+        if interval_unit == "minutes":
+            schedule.every(config["RUN_INTERVAL"]).minutes.do(scanner.run_scan)
+        else:
+            schedule.every(config["RUN_INTERVAL"]).hours.do(scanner.run_scan)
 
     while not stop_event.is_set():
         schedule.run_pending()

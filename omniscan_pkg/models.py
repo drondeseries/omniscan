@@ -20,7 +20,7 @@ class StuckFileTracker:
     def __init__(self, db_file="history.db", config=None):
         self.db_file = db_file
         self.config = config or {}
-        self.max_retries = 3
+        self.max_retries = self.config.get("MAX_RETRIES", 3)
         self.lock = threading.Lock()
         self.stuck_paths = set()
         self._init_db()

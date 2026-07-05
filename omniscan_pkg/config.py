@@ -1,6 +1,6 @@
+import os
 import configparser
 import logging
-import os
 
 
 def get_config_val(
@@ -66,6 +66,12 @@ def load_config(config_path="config.ini"):
     )
     cfg["RUN_INTERVAL"] = get_config_val(
         config, "RUN_INTERVAL", "behaviour", "run_interval", 24, int
+    )
+    cfg["RUN_INTERVAL_UNIT"] = get_config_val(
+        config, "RUN_INTERVAL_UNIT", "behaviour", "run_interval_unit", "hours"
+    )
+    cfg["MAX_RETRIES"] = get_config_val(
+        config, "MAX_RETRIES", "behaviour", "max_retries", 3, int
     )
     cfg["DISCORD_WEBHOOK_URL"] = get_config_val(
         config, "DISCORD_WEBHOOK_URL", "notifications", "discord_webhook_url"

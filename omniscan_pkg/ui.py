@@ -17,6 +17,47 @@ from plexapi.server import PlexServer
 logger = logging.getLogger(__name__)
 
 
+def get_next_retry_time_str():
+    import schedule
+    from datetime import datetime
+    jobs = schedule.jobs
+    if not jobs:
+        return None
+    scan_jobs = []
+    for job in jobs:
+        func = getattr(job, "job_func", None)
+        if func:
+            func_name = getattr(func, "__name__", "")
+            if "run_scan" in func_name:
+                scan_jobs.append(job)
+    target_jobs = scan_jobs if scan_jobs else jobs
+    next_runs = [j.next_run for j in target_jobs if j.next_run is not None]
+    if not next_runs:
+        return None
+    next_run = min(next_runs)
+    
+    # Calculate relative time
+    now = datetime.now()
+    diff = next_run - now
+    diff_seconds = int(diff.total_seconds())
+    
+    if diff_seconds < 0:
+        rel_str = "any moment now"
+    elif diff_seconds < 60:
+        rel_str = f"in {diff_seconds}s"
+    elif diff_seconds < 3600:
+        rel_str = f"in {diff_seconds // 60}m"
+    else:
+        hours = diff_seconds // 3600
+        mins = (diff_seconds % 3600) // 60
+        if mins > 0:
+            rel_str = f"in {hours}h {mins}m"
+        else:
+            rel_str = f"in {hours}h"
+            
+    return f"{next_run.strftime('%Y-%m-%d %H:%M:%S')} ({rel_str})"
+
+
 def apply_theme():
     ui.dark_mode().enable()
     ui.add_head_html("""
@@ -1484,6 +1525,33 @@ def init_ui(app, scanner):
                                             ui.html(
                                                 f'<span style="font-size:10px;color:#475569">Last: {extra["last_seen"]}</span>'
                                             )
+                                            next_retry = get_next_retry_time_str()
+                                            if next_retry:
+                                                ui.html(
+                                                    f'<span style="font-size:10px;color:#38bdf8;font-weight:600">'
+                                                    f'<i class="fas fa-clock" style="font-size:8.5px;margin-right:2px"></i>'
+                                                    f"Next Retry: {next_retry}</span>"
+                                                )
+
+                                    # Missing info row
+                                    if mode == "missing":
+                                        with ui.element("div").style(
+                                            "display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:3px"
+                                        ):
+                                            ui.html(
+                                                f'<span style="display:inline-flex;align-items:center;gap:4px;background:rgba(234,179,8,0.1);'
+                                                f"border:1px solid rgba(234,179,8,0.25);color:#f59e0b;font-size:10px;font-weight:700;"
+                                                f'padding:2px 8px;border-radius:9999px">'
+                                                f'<i class="fas fa-circle-xmark" style="font-size:8px"></i>'
+                                                f" Missing from library</span>"
+                                            )
+                                            next_retry = get_next_retry_time_str()
+                                            if next_retry:
+                                                ui.html(
+                                                    f'<span style="font-size:10px;color:#38bdf8;font-weight:600">'
+                                                    f'<i class="fas fa-clock" style="font-size:8.5px;margin-right:2px"></i>'
+                                                    f"Next Retry: {next_retry}</span>"
+                                                )
 
                             # Right: action buttons
                             with ui.element("div").style(
@@ -1715,6 +1783,8 @@ def init_ui(app, scanner):
             "scan_delay": c.get("SCAN_DELAY", 0.0),
             "watch_mode": c.get("WATCH_MODE", False),
             "run_interval": c.get("RUN_INTERVAL", 24),
+            "run_interval_unit": c.get("RUN_INTERVAL_UNIT", "hours"),
+            "max_retries": c.get("MAX_RETRIES", 3),
             "run_on_startup": c.get("RUN_ON_STARTUP", True),
             "start_time": c.get("START_TIME", ""),
             "incremental_scan": c.get("INCREMENTAL_SCAN", False),
@@ -2008,7 +2078,26 @@ def init_ui(app, scanner):
                     )
                     run_interval = (
                         ui.number(
-                            "Scheduled Run Interval (h)", value=values["run_interval"]
+                            "Scheduled Run Interval", value=values["run_interval"]
+                        )
+                        .classes("grow")
+                        .props("outlined dense")
+                    )
+                    run_interval_unit = (
+                        ui.select(
+                            options={
+                                "hours": "Hours",
+                                "minutes": "Minutes",
+                            },
+                            value=values["run_interval_unit"],
+                            label="Interval Unit",
+                        )
+                        .classes("grow")
+                        .props("outlined dense")
+                    )
+                    max_retries = (
+                        ui.number(
+                            "Max Stuck Retries", value=values["max_retries"]
                         )
                         .classes("grow")
                         .props("outlined dense")
@@ -2298,6 +2387,8 @@ def init_ui(app, scanner):
                     c["SCAN_DELAY"] = float(scan_delay.value)
                     c["WATCH_MODE"] = watch_mode.value
                     c["RUN_INTERVAL"] = int(run_interval.value)
+                    c["RUN_INTERVAL_UNIT"] = str(run_interval_unit.value)
+                    c["MAX_RETRIES"] = int(max_retries.value)
                     c["RUN_ON_STARTUP"] = run_on_startup.value
                     c["START_TIME"] = start_time.value
                     c["INCREMENTAL_SCAN"] = incremental_scan.value
@@ -2383,6 +2474,8 @@ def init_ui(app, scanner):
                         cfg.set("behaviour", "scan_delay", str(c["SCAN_DELAY"]))
                         cfg.set("behaviour", "watch", str(c["WATCH_MODE"]).lower())
                         cfg.set("behaviour", "run_interval", str(c["RUN_INTERVAL"]))
+                        cfg.set("behaviour", "run_interval_unit", str(c["RUN_INTERVAL_UNIT"]))
+                        cfg.set("behaviour", "max_retries", str(c["MAX_RETRIES"]))
                         cfg.set(
                             "behaviour",
                             "run_on_startup",
