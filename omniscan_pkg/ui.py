@@ -2592,6 +2592,39 @@ def init_ui(app, scanner):
                         with open("config.ini", "w") as f:
                             cfg.write(f)
 
+                        # Dynamically update the scheduler and stuck file tracker limit
+                        try:
+                            import schedule
+                            schedule.clear()
+                            
+                            interval_unit = c.get("RUN_INTERVAL_UNIT", "hours").lower()
+                            interval = c.get("RUN_INTERVAL", 24)
+                            start_time = c.get("START_TIME", "")
+                            
+                            if start_time and interval_unit == "hours":
+                                try:
+                                    start_hour, start_minute = map(int, start_time.split(":"))
+                                    for i in range(0, 24, interval):
+                                        hour = (start_hour + i) % 24
+                                        time_str = f"{hour:02d}:{start_minute:02d}"
+                                        schedule.every().day.at(time_str).do(scanner.run_scan)
+                                except ValueError:
+                                    schedule.every(interval).hours.do(scanner.run_scan)
+                            else:
+                                if interval_unit == "minutes":
+                                    schedule.every(interval).minutes.do(scanner.run_scan)
+                                else:
+                                    schedule.every(interval).hours.do(scanner.run_scan)
+                            
+                            logger.info(f"Rescheduled runs: every {interval} {interval_unit}")
+                        except Exception as sched_err:
+                            logger.error(f"Error updating scheduler on settings save: {sched_err}")
+
+                        try:
+                            scanner.history.max_retries = c.get("MAX_RETRIES", 3)
+                        except Exception as tracker_err:
+                            logger.error(f"Error updating tracker max_retries: {tracker_err}")
+
                         if c["SERVER_TYPE"] == "plex":
                             scanner.connect_to_plex(retry=False)
                             scanner.get_library_ids()
