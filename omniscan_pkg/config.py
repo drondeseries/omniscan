@@ -34,11 +34,7 @@ def get_config_val(
 
 
 def normalize_emby_url(url, server_type):
-    """Normalize Emby URL to include the /emby prefix if not present."""
-    if url and server_type == "emby":
-        url_stripped = url.rstrip("/")
-        if not url_stripped.endswith("/emby"):
-            return f"{url_stripped}/emby"
+    """Return URL as-is without forcing /emby prefix."""
     return url
 
 

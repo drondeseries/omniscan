@@ -288,11 +288,13 @@ class PlexScanner:
             # Jellyfin/Emby WS endpoint
             import json
 
+            server_type = self.config.get("SERVER_TYPE", "jellyfin").lower()
+            ws_path = "/embywebsocket" if server_type == "emby" else "/socket"
             ws_endpoint = (
-                f"{ws_url}/socket?api_key={self.config['API_KEY']}&deviceId=omniscan"
+                f"{ws_url}{ws_path}?api_key={self.config['API_KEY']}&deviceId=omniscan"
             )
 
-            logger.info(f"📡 Connecting to Jellyfin/Emby WebSocket: {ws_url}/socket")
+            logger.info(f"📡 Connecting to {server_type.capitalize()} WebSocket: {ws_url}{ws_path}")
 
             while not self.jellyfin_ws_stop.is_set():
                 try:
