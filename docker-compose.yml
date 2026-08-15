@@ -7,14 +7,13 @@ services:
     ports:
       - 8085:8000
     environment:
-      - PUID=1000
-      - PGID=1000
-      - TZ=America/New_York
+      - TZ=${TZ:-UTC}
+      - OMNISCAN_BOOTSTRAP_TOKEN=${OMNISCAN_BOOTSTRAP_TOKEN:-}
     volumes: 
       - /media/docker/data/omniscan:/app/config
       - /etc/localtime:/etc/localtime:ro
-      - /mnt:/mnt:rslave
-      - /media:/media:rslave
+      - /mnt:/mnt:ro,rslave
+      - /media:/media:ro,rslave
     networks:
       - pangolin
 

@@ -1,47 +1,45 @@
-import asyncio
-import logging
+import configparser
 import os
-import pathlib
-import re
-import secrets
 import time
+import logging
+import asyncio
+import re
+import pathlib
+import requests
+import secrets
+import threading
 from collections import deque
 from datetime import datetime
-from typing import List, Optional
-
-import requests
+from typing import Optional, List
 from fastapi import (
-    Depends,
     FastAPI,
-    Form,
-    HTTPException,
     Request,
+    Depends,
+    HTTPException,
+    status,
+    Form,
     WebSocket,
     WebSocketDisconnect,
-    status,
 )
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from nicegui import app as nicegui_app
-from nicegui import ui
-from pydantic import BaseModel
 from starlette.middleware.sessions import SessionMiddleware
+from pydantic import BaseModel, Field
+from nicegui import ui, app as nicegui_app
 
 nicegui_app.config.socket_io_js_transports = ["polling", "websocket"]
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from plexapi.server import PlexServer
-from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
-
+from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 from .config import get_webhook_token, normalize_emby_url
-from .ui import init_ui
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from .webhook_parser import parse_webhook
+from .ui import init_ui
 
 logger = logging.getLogger(__name__)
 
 # Monkeypatch python-engineio to prevent KeyError: 'REQUEST_METHOD' on client disconnects during connection setup.
 try:
     import sys
-
     import engineio.async_drivers.asgi
 
     original_translate_request = engineio.async_drivers.asgi.translate_request
@@ -81,10 +79,9 @@ except Exception as e:
 
 # Monkeypatch python-engineio handle_request to prevent KeyError: 'Session is disconnected' / 'Session not found' during concurrent disconnects.
 try:
+    import engineio.async_server
     import inspect
     import urllib.parse
-
-    import engineio.async_server
 
     original_handle_request = engineio.async_server.AsyncServer.handle_request
 
@@ -143,9 +140,9 @@ def _derive_secret_key():
     try:
         import configparser
 
-        cfg = configparser.ConfigParser()
-        cfg.read("config.ini")
-        _pw = cfg.get("web", "password", fallback=None) or os.environ.get(
+        _cfg = configparser.ConfigParser()
+        _cfg.read("config.ini")
+        _pw = _cfg.get("web", "password", fallback=None) or os.environ.get(
             "WEB_PASSWORD"
         )
         if _pw:
@@ -172,6 +169,8 @@ if os.path.exists(ASSETS_PATH):
     app.mount("/assets", StaticFiles(directory=ASSETS_PATH), name="assets")
 
 scanner_instance = None
+setup_lock = threading.Lock()
+login_attempts = {}
 
 
 def set_scanner(scanner):
@@ -186,6 +185,17 @@ def is_setup_completed():
     return bool(config_pass and config_pass.strip())
 
 
+def setup_is_allowed(request: Request):
+    if is_setup_completed():
+        return False
+    bootstrap = os.environ.get("OMNISCAN_BOOTSTRAP_TOKEN")
+    supplied = request.headers.get("X-Omniscan-Bootstrap")
+    if bootstrap:
+        return bool(supplied and secrets.compare_digest(supplied, bootstrap))
+    host = request.client.host if request.client else ""
+    return host in {"127.0.0.1", "::1", "localhost"}
+
+
 class SettingsUpdate(BaseModel):
     server_type: str
     server_url: str
@@ -193,18 +203,18 @@ class SettingsUpdate(BaseModel):
     plex_server: str
     plex_token: str
     scan_directories: str
-    scan_workers: int
-    scan_debounce: int
-    scan_delay: float
+    scan_workers: int = Field(ge=1, le=64)
+    scan_debounce: int = Field(ge=0, le=3600)
+    scan_delay: float = Field(ge=0, le=3600)
     watch_mode: bool
-    run_interval: int
+    run_interval: int = Field(ge=1, le=8760)
     run_on_startup: bool
     start_time: Optional[str] = None
     incremental_scan: bool
-    scan_since_days: int
+    scan_since_days: int = Field(ge=0, le=3650)
     symlink_check: bool
     empty_trash: bool
-    deletion_threshold: int
+    deletion_threshold: int = Field(ge=1, le=1000000)
     abort_on_mass_deletion: bool
     notifications_enabled: bool
     discord_webhook_url: str
@@ -308,11 +318,14 @@ class ConnectionManager:
             pass
 
     async def broadcast_to_clients(self, message: str):
-        for connection in self.active_connections:
+        failed = []
+        for connection in list(self.active_connections):
             try:
                 await connection.send_text(message)
             except Exception:
-                pass
+                failed.append(connection)
+        for connection in failed:
+            self.disconnect(connection)
 
 
 manager = ConnectionManager()
@@ -400,6 +413,8 @@ security = HTTPBasic()
 
 
 def authenticate_basic(credentials: HTTPBasicCredentials = Depends(security)):
+    if is_auth_disabled():
+        return credentials.username or "admin"
     if not scanner_instance:
         raise HTTPException(status_code=503, detail="Initializing")
     username = scanner_instance.config.get("WEB_USERNAME", "admin")
@@ -435,6 +450,8 @@ async def websocket_endpoint(websocket: WebSocket):
     except AssertionError:
         pass
 
+    if is_auth_disabled():
+        user = "admin"
     if not user:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
@@ -445,6 +462,8 @@ async def websocket_endpoint(websocket: WebSocket):
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:
+        pass
+    finally:
         manager.disconnect(websocket)
 
 
@@ -474,8 +493,8 @@ async def get_stats(u: str = Depends(get_current_user)):
     with scanner_instance.pending_scans_lock:
         now = time.time()
         for (lid, path, _), (lt, metadata) in scanner_instance.pending_scans.items():
-            name = metadata["name"] if metadata else os.path.basename(path)
-            details = metadata["details"] if metadata else ""
+            name = metadata.get("name", os.path.basename(path)) if metadata else os.path.basename(path)
+            details = metadata.get("details", "") if metadata else ""
             remaining = max(
                 0, int(scanner_instance.config.get("SCAN_DEBOUNCE", 10) - (now - lt))
             )
@@ -600,7 +619,9 @@ async def test_conn(s: SettingsUpdate, u: str = Depends(get_current_user)):
 
 
 @app.post("/api/test-connection-unauthenticated")
-async def test_conn_unauth(s: SettingsUpdate):
+async def test_conn_unauth(s: SettingsUpdate, request: Request):
+    if not setup_is_allowed(request):
+        raise HTTPException(status_code=403, detail="Bootstrap authorization required")
     if is_setup_completed():
         raise HTTPException(status_code=403, detail="Forbidden")
     try:
@@ -625,9 +646,16 @@ async def test_conn_unauth(s: SettingsUpdate):
 
 @app.post("/api/setup")
 async def setup_submit(r: SetupSubmit, request: Request):
-    if is_setup_completed():
+    if not setup_is_allowed(request):
+        raise HTTPException(status_code=403, detail="Bootstrap authorization required")
+    with setup_lock:
+        if is_setup_completed():
+            return JSONResponse(
+                {"status": "error", "error": "Setup already completed"}, status_code=400
+            )
+    if len(r.username.strip()) < 1 or len(r.password.strip()) < 12:
         return JSONResponse(
-            {"status": "error", "error": "Setup already completed"}, status_code=400
+            {"status": "error", "error": "Username and password do not meet minimum requirements"}, status_code=400
         )
     if not r.password.strip():
         return JSONResponse(
@@ -649,9 +677,7 @@ async def setup_submit(r: SetupSubmit, request: Request):
     ]
 
     try:
-        import configparser
-
-        cfg = configparser.ConfigParser()
+        cfg = configparser.ConfigParser(interpolation=None)
         cfg.read("config.ini")
 
         sections_to_check = ["web", "server", "plex", "scan"]
@@ -661,6 +687,7 @@ async def setup_submit(r: SetupSubmit, request: Request):
 
         cfg.set("web", "username", str(c["WEB_USERNAME"]))
         cfg.set("web", "password", str(c["WEB_PASSWORD"]))
+        cfg.set("web", "webhook_token", str(c.get("WEBHOOK_TOKEN", secrets.token_urlsafe(32))))
         cfg.set("server", "type", str(c["SERVER_TYPE"]))
         cfg.set("server", "url", str(c["SERVER_URL"]))
         cfg.set("server", "api_key", str(c["API_KEY"]))
@@ -736,9 +763,7 @@ async def update_settings(s: SettingsUpdate, u: str = Depends(get_current_user))
             c["PATH_REWRITES"].append((parts[0].strip(), parts[1].strip()))
 
     try:
-        import configparser
-
-        cfg = configparser.ConfigParser()
+        cfg = configparser.ConfigParser(interpolation=None)
         cfg.read("config.ini")
         for sec in [
             "server",
@@ -998,9 +1023,8 @@ async def test_webhook(data: dict, u: str = Depends(get_current_user)):
         return JSONResponse({"error": "Invalid URL"}, status_code=400)
 
     try:
-        from discord import Color, Embed
-
         from .notifications import send_discord_webhook_sync
+        from discord import Embed, Color
 
         embed = Embed(
             title="✅ Omniscan Test Message",
@@ -1069,9 +1093,12 @@ async def webhook_trigger(request: Request, apikey: Optional[str] = None):
 
     # Authenticate webhook request
     expected_token = get_webhook_token(
-        scanner_instance.config.get("WEB_PASSWORD", "admin")
+        configured_token=scanner_instance.config.get("WEBHOOK_TOKEN")
     )
-    if apikey != expected_token:
+    supplied_token = request.headers.get("X-Omniscan-Token") or apikey
+    if not expected_token or not supplied_token or not secrets.compare_digest(
+        supplied_token, expected_token
+    ):
         raise HTTPException(status_code=401, detail="Unauthorized")
     try:
         data = await request.json()
@@ -1091,6 +1118,8 @@ async def webhook_trigger(request: Request, apikey: Optional[str] = None):
         if "path" in data:
             raw_paths.add(data["path"])
         if "paths" in data and isinstance(data["paths"], list):
+            if len(data["paths"]) > 100:
+                raise HTTPException(status_code=413, detail="Too many paths")
             raw_paths.update(data["paths"])
 
         # 2. Sonarr/Radarr (Grab/Download/Rename)
@@ -1128,12 +1157,16 @@ async def webhook_trigger(request: Request, apikey: Optional[str] = None):
         if "destPath" in data:
             raw_paths.add(data["destPath"])
 
+        if len(raw_paths) > 100:
+            raise HTTPException(status_code=413, detail="Too many paths")
+
         # Apply path rewrites (Autopulse feature)
         rewrites = scanner_instance.config.get("PATH_REWRITES", [])
         rewritten_paths = set()
         for p in raw_paths:
-            if not p:
+            if not p or not isinstance(p, str):
                 continue
+            p = p.strip()
             rewrote = False
             for src, dst in rewrites:
                 if p.startswith(src):
@@ -1167,6 +1200,17 @@ async def webhook_trigger(request: Request, apikey: Optional[str] = None):
         for p in paths_to_scan:
             if not p:
                 continue
+            normalized = os.path.realpath(p)
+            scan_roots = scanner_instance.config.get("SCAN_PATHS", [])
+            allowed = not scan_roots or any(
+                normalized == os.path.realpath(root)
+                or normalized.startswith(os.path.realpath(root) + os.sep)
+                for root in scan_roots
+            )
+            if not allowed:
+                logger.warning("Rejected webhook path outside configured scan roots")
+                continue
+            p = normalized
             logger.info(f"Webhook trigger for: {p}")
 
             # Retry logic for filesystem latency (e.g. rclone mounts)

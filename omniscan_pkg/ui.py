@@ -639,7 +639,7 @@ def init_ui(app, scanner):
                         if scheme == "https" and base_url.startswith("http://"):
                             base_url = base_url.replace("http://", "https://", 1)
                         token = get_webhook_token(
-                            scanner.config.get("WEB_PASSWORD", "admin")
+                            configured_token=scanner.config.get("WEBHOOK_TOKEN")
                         )
                         webhook_url = f"{base_url}/api/webhook?apikey={token}"
 
@@ -1947,7 +1947,9 @@ def init_ui(app, scanner):
                 base_url = str(request.base_url).rstrip("/")
                 if scheme == "https" and base_url.startswith("http://"):
                     base_url = base_url.replace("http://", "https://", 1)
-                token = get_webhook_token(scanner.config.get("WEB_PASSWORD", "admin"))
+                token = get_webhook_token(
+                    configured_token=scanner.config.get("WEBHOOK_TOKEN")
+                )
                 webhook_url = f"{base_url}/api/webhook?apikey={token}"
 
                 with ui.row().classes(

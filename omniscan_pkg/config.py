@@ -1,6 +1,9 @@
 import os
 import configparser
 import logging
+import secrets
+import stat
+import tempfile
 
 
 def get_config_val(
@@ -39,7 +42,7 @@ def normalize_emby_url(url, server_type):
 
 
 def load_config(config_path="config.ini"):
-    config = configparser.ConfigParser()
+    config = configparser.ConfigParser(interpolation=None)
     config.read(config_path)
 
     cfg = {}
@@ -60,14 +63,18 @@ def load_config(config_path="config.ini"):
     cfg["SCAN_INTERVAL"] = get_config_val(
         config, "SCAN_INTERVAL", "behaviour", "scan_interval", 15, int
     )
-    cfg["RUN_INTERVAL"] = get_config_val(
-        config, "RUN_INTERVAL", "behaviour", "run_interval", 24, int
+    cfg["RUN_INTERVAL"] = max(
+        1,
+        get_config_val(
+            config, "RUN_INTERVAL", "behaviour", "run_interval", 24, int
+        ),
     )
     cfg["RUN_INTERVAL_UNIT"] = get_config_val(
         config, "RUN_INTERVAL_UNIT", "behaviour", "run_interval_unit", "hours"
     )
-    cfg["MAX_RETRIES"] = get_config_val(
-        config, "MAX_RETRIES", "behaviour", "max_retries", 3, int
+    cfg["MAX_RETRIES"] = max(
+        1,
+        get_config_val(config, "MAX_RETRIES", "behaviour", "max_retries", 3, int),
     )
     cfg["DISCORD_WEBHOOK_URL"] = get_config_val(
         config, "DISCORD_WEBHOOK_URL", "notifications", "discord_webhook_url"
@@ -258,6 +265,35 @@ def load_config(config_path="config.ini"):
         "false",
         lambda x: str(x).lower() == "true",
     )
+    cfg["WEBHOOK_TOKEN"] = get_config_val(
+        config,
+        "WEBHOOK_TOKEN",
+        "web",
+        "webhook_token",
+        None,
+    )
+    if not cfg["WEBHOOK_TOKEN"]:
+        cfg["WEBHOOK_TOKEN"] = secrets.token_urlsafe(32)
+        if config_path:
+            try:
+                if not config.has_section("web"):
+                    config.add_section("web")
+                config.set("web", "webhook_token", cfg["WEBHOOK_TOKEN"])
+                fd, temporary_path = tempfile.mkstemp(
+                    prefix=".config.", dir=os.path.dirname(os.path.abspath(config_path)) or ".", text=True
+                )
+                os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)
+                with os.fdopen(fd, "w") as handle:
+                    config.write(handle)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary_path, config_path)
+                os.chmod(config_path, stat.S_IRUSR | stat.S_IWUSR)
+            except OSError:
+                try:
+                    os.unlink(temporary_path)
+                except (OSError, UnboundLocalError):
+                    pass
 
     # Parse Directories
     directories_raw = get_config_val(
@@ -378,9 +414,38 @@ def load_config(config_path="config.ini"):
     return cfg
 
 
-def get_webhook_token(password):
-    import hashlib
+def get_webhook_token(password=None, configured_token=None):
+    if configured_token:
+        return configured_token
+    if password:
+        import hashlib
 
-    if not password:
-        password = "admin"
-    return hashlib.sha256(f"omniscan-webhook-{password}".encode()).hexdigest()[:16]
+        return hashlib.sha256(f"omniscan-webhook-{password}".encode()).hexdigest()[:16]
+    return None
+
+
+def save_config(config, config_path="config.ini"):
+    directory = os.path.dirname(os.path.abspath(config_path)) or "."
+    parser = configparser.ConfigParser(interpolation=None)
+    if os.path.exists(config_path):
+        parser.read(config_path)
+    for section, values in config.items():
+        if not parser.has_section(section):
+            parser.add_section(section)
+        for key, value in values.items():
+            parser.set(section, key, str(value))
+    fd, temporary_path = tempfile.mkstemp(prefix=".config.", dir=directory, text=True)
+    try:
+        os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)
+        with os.fdopen(fd, "w") as handle:
+            parser.write(handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, config_path)
+        os.chmod(config_path, stat.S_IRUSR | stat.S_IWUSR)
+    except Exception:
+        try:
+            os.unlink(temporary_path)
+        except OSError:
+            pass
+        raise

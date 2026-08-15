@@ -1,5 +1,7 @@
+import os
+import tempfile
 import unittest
-from unittest.mock import MagicMock, patch, mock_open
+from unittest.mock import MagicMock, patch
 from omniscan_pkg.scanner import PlexScanner
 from omniscan_pkg.models import RunStats, StuckFileTracker
 import logging
@@ -25,7 +27,40 @@ class TestPlexScanner(unittest.TestCase):
             "SCAN_WORKERS": 4,
             "SERVER_TYPE": "plex",
         }
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.config["HISTORY_DB"] = os.path.join(self.temp_dir.name, "history.db")
         self.scanner = PlexScanner(self.config)
+
+    def tearDown(self):
+        self.scanner.event_executor.shutdown(wait=True)
+        self.scanner.scan_monitor_executor.shutdown(wait=True)
+        self.scanner.temp_dir = getattr(self.scanner, "temp_dir", None)
+        self.temp_dir.cleanup()
+
+    def test_integrity_timeout_is_quarantined_until_file_changes(self):
+        file_path = os.path.join(self.temp_dir.name, "broken.mkv")
+        with open(file_path, "wb") as handle:
+            handle.write(b"media")
+
+        tracker = self.scanner.history
+        tracker.quarantine_integrity_failure(file_path, "ffprobe timeout")
+        self.assertTrue(tracker.is_quarantined(file_path))
+
+        with open(file_path, "ab") as handle:
+            handle.write(b"changed")
+        self.assertFalse(tracker.is_quarantined(file_path))
+
+    @patch("subprocess.run")
+    def test_ffprobe_timeout_is_reported(self, mock_run):
+        import subprocess
+
+        mock_run.side_effect = subprocess.TimeoutExpired("ffprobe", 30)
+        self.scanner.config["INTEGRITY_CHECK"] = True
+        self.scanner.config["FFPROBE_CHECK"] = True
+        file_path = os.path.join(self.temp_dir.name, "timeout.mkv")
+        with open(file_path, "wb") as handle:
+            handle.write(b"media")
+        self.assertEqual(self.scanner.check_file_integrity(file_path), (False, "ffprobe timeout"))
 
     def test_is_ignored(self):
         self.assertTrue(self.scanner.is_ignored("/path/to/sample_file.mkv"))

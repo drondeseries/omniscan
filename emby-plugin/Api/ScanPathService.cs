@@ -12,14 +12,14 @@ using OmniscanEmbyPlugin.Services;
 namespace OmniscanEmbyPlugin.Api
 {
     [Route("/Library/ScanPath", "POST", Summary = "Performs a targeted library scan for a specific path")]
-    [Authenticated]
+    [Authenticated(Roles = "Admin")]
     public class ScanPathRequest : IReturn<ScanPathResponse>
     {
         public string Path { get; set; }
     }
 
     [Route("/Library/ScanPaths", "POST", Summary = "Performs a targeted library scan for multiple paths in a single batch")]
-    [Authenticated]
+    [Authenticated(Roles = "Admin")]
     public class ScanPathsRequest : IReturn<ScanPathsResponse>
     {
         public List<string> Paths { get; set; }
@@ -82,6 +82,11 @@ namespace OmniscanEmbyPlugin.Api
         public ScanPathsResponse Post(ScanPathsRequest request)
         {
             if (request.Paths == null || request.Paths.Count == 0)
+            {
+                return new ScanPathsResponse { Results = new List<ScanPathResponse>() };
+            }
+
+            if (request.Paths.Count > 100)
             {
                 return new ScanPathsResponse { Results = new List<ScanPathResponse>() };
             }

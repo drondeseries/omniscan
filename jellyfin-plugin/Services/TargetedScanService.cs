@@ -101,12 +101,20 @@ public class TargetedScanService
         missingPaths.Reverse();
 
         BaseItem? lastCreated = null;
+        var currentParent = knownAncestor;
         foreach (var missingPath in missingPaths)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            lastCreated = await CreateItemAsync(missingPath, knownAncestor, cancellationToken)
+            lastCreated = await CreateItemAsync(
+                missingPath,
+                currentParent,
+                cancellationToken)
                 .ConfigureAwait(false)
                 ?? lastCreated;
+            if (lastCreated is Folder folder)
+            {
+                currentParent = folder;
+            }
         }
 
         if (lastCreated is null)

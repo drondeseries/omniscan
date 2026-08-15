@@ -50,6 +50,15 @@ class StuckFileTracker:
                                 metadata TEXT
                             )
                         """)
+                        conn.execute("""
+                            CREATE TABLE IF NOT EXISTS integrity_quarantine (
+                                path TEXT PRIMARY KEY,
+                                size INTEGER NOT NULL,
+                                mtime_ns INTEGER NOT NULL,
+                                reason TEXT NOT NULL,
+                                last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                            )
+                        """)
                         # Migration: Add metadata column if it doesn't exist
                         columns = [
                             info[1]
@@ -155,16 +164,59 @@ class StuckFileTracker:
                             )
 
                 self.stuck_paths.add(file_path)
-                return attempts > self.max_retries
+                return attempts >= self.max_retries
             except Exception as e:
                 logger.error(f"DB Error incrementing {file_path}: {e}")
                 return False
 
+    def is_quarantined(self, file_path):
+        try:
+            file_stat = os.stat(file_path)
+        except OSError:
+            return False
+        with self.lock:
+            try:
+                with closing(sqlite3.connect(self.db_file)) as conn:
+                    row = conn.execute(
+                        "SELECT size, mtime_ns FROM integrity_quarantine WHERE path = ?",
+                        (file_path,),
+                    ).fetchone()
+                return bool(row and row == (file_stat.st_size, file_stat.st_mtime_ns))
+            except Exception as e:
+                logger.error(f"DB Error checking integrity quarantine: {e}")
+                return False
+
+    def quarantine_integrity_failure(self, file_path, reason):
+        try:
+            file_stat = os.stat(file_path)
+        except OSError:
+            return
+        with self.lock:
+            try:
+                with closing(sqlite3.connect(self.db_file)) as conn:
+                    with conn:
+                        conn.execute(
+                            "INSERT OR REPLACE INTO integrity_quarantine "
+                            "(path, size, mtime_ns, reason, last_seen) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)",
+                            (file_path, file_stat.st_size, file_stat.st_mtime_ns, reason),
+                        )
+            except Exception as e:
+                logger.error(f"DB Error storing integrity quarantine: {e}")
+
+    def clear_integrity_quarantine(self, file_path):
+        with self.lock:
+            try:
+                with closing(sqlite3.connect(self.db_file)) as conn:
+                    with conn:
+                        conn.execute(
+                            "DELETE FROM integrity_quarantine WHERE path = ?", (file_path,)
+                        )
+            except Exception as e:
+                logger.error(f"DB Error clearing integrity quarantine: {e}")
+
     def clear_entry(self, file_path):
         """Remove file from history if it exists."""
         with self.lock:
-            if file_path not in self.stuck_paths:
-                return
             try:
                 with closing(sqlite3.connect(self.db_file)) as conn:
                     with conn:

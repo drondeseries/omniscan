@@ -43,6 +43,11 @@ ENV/
 *.sqlite
 missing_files_history.json
 conductor/
+.medusa/
+jellyfin-plugin/bin/
+jellyfin-plugin/obj/
+emby-plugin/bin/
+emby-plugin/obj/
 
 # Frontend (replaced by NiceGUI)
 frontend/

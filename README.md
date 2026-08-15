@@ -64,7 +64,7 @@ services:
    ```
 
 3. **Access the Dashboard:**
-   Open `http://<your-ip>:8085` — default login: `admin` / `admin` (change in Settings immediately).
+   Open `http://<your-ip>:8085` — set your administrator credentials and optional `OMNISCAN_BOOTSTRAP_TOKEN` environment variable on first run.
 
 ### Option 2: Manual Installation (Python 3.11+)
 
@@ -152,8 +152,8 @@ When a new media file is detected, Omniscan contacts the plugin, which walks the
 - **Auto-Fallbacks** — If the plugin is not installed, Omniscan automatically falls back to standard media-updated notifications.
 
 For installation instructions, project structure, and configurations:
-- 🌐 [Jellyfin Plugin README](file:///opt/altmount/github/omniscan/jellyfin-plugin/README.md)
-- 🌐 [Emby Plugin README](file:///opt/altmount/github/omniscan/emby-plugin/README.md) (coming soon, or use the compatible targeted-scans plugin)
+- 🌐 [Jellyfin Plugin README](jellyfin-plugin/README.md)
+- 🌐 [Emby Plugin README](emby-plugin/README.md)
 
 ---
 

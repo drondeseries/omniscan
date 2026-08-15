@@ -17,3 +17,8 @@ venv
 .env
 .vscode
 .idea
+.medusa
+jellyfin-plugin/bin
+jellyfin-plugin/obj
+emby-plugin/bin
+emby-plugin/obj

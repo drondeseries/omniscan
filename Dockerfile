@@ -1,5 +1,8 @@
 FROM python:3.11-slim
 WORKDIR /app
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
 # Install dependencies, download and install a secure static build of FFmpeg/FFprobe (>=8.1.2) to mitigate CVE-2026-8461
 RUN apt-get update && apt-get install -y --no-install-recommends curl xz-utils ca-certificates && \
     arch=$(uname -m) && \
@@ -28,4 +31,6 @@ RUN mkdir -p /app/config && chown -R omniscan:omniscan /app
 WORKDIR /app/config
 ENV PYTHONPATH=/app
 USER omniscan
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"
 CMD ["python", "-m", "omniscan_pkg.main"]

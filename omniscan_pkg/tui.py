@@ -67,8 +67,26 @@ def load_local_config():
 
 
 def authenticate():
-    """Bypass authentication for TUI local use."""
-    return True, "Authenticated"
+    """Authenticate TUI session against API."""
+    global session
+    try:
+        if username and password:
+            res = session.post(
+                f"{api_url}/login",
+                data={"username": username, "password": password},
+                timeout=3,
+                allow_redirects=False,
+            )
+            if res.status_code in {200, 302, 303}:
+                return True, "Authenticated"
+        res = session.get(f"{api_url}/api/stats", timeout=3)
+        if res.status_code == 200:
+            return True, "Authenticated"
+        if res.status_code == 401:
+            return False, "Authentication Required"
+    except Exception as e:
+        return False, str(e)
+    return False, "Authentication Failed"
 
 
 def api_worker():
@@ -279,7 +297,11 @@ def draw_tui(stdscr):
                 for disk in storage_list[:2]:
                     path = disk.get("path", "/")
                     free = disk.get("free", "0B")
-                    pct = disk.get("percent", 0)
+                    pct_raw = str(disk.get("percent", "0")).rstrip("%")
+                    try:
+                        pct = float(pct_raw)
+                    except ValueError:
+                        pct = 0.0
 
                     bar_len = 10
                     filled = int((pct / 100) * bar_len)

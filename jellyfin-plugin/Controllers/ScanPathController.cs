@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.IO;
 using System.ComponentModel.DataAnnotations;
 using System.Linq;
 using System.Net.Mime;
@@ -77,7 +78,7 @@ public sealed class ScanPathsResponse
 /// </summary>
 [ApiController]
 [Route("Library")]
-[Authorize]
+[Authorize(Policy = "RequiresElevation")]
 public class ScanPathController : ControllerBase
 {
     private readonly TargetedScanService _scanService;
@@ -123,6 +124,11 @@ public class ScanPathController : ControllerBase
             return BadRequest("Path must not be empty.");
         }
 
+        if (!Path.IsPathFullyQualified(request.Path))
+        {
+            return BadRequest("Path must be absolute.");
+        }
+
         _logger.LogInformation("OmniscanPlugin: ScanPath request for: {Path}", request.Path);
         var result = await _scanService.ScanPathAsync(request.Path, null, cancellationToken)
             .ConfigureAwait(false);
@@ -156,17 +162,23 @@ public class ScanPathController : ControllerBase
             return BadRequest("Paths must not be empty.");
         }
 
+        if (request.Paths.Count > 100)
+        {
+            return BadRequest("A maximum of 100 paths may be submitted.");
+        }
+
         _logger.LogInformation(
             "OmniscanPlugin: ScanPaths batch request for {Count} path(s).", request.Paths.Count);
 
         // Shared FindByPath cache so repeated ancestor lookups hit the cache.
         var cache = new Dictionary<string, MediaBrowser.Controller.Entities.BaseItem?>(
             System.StringComparer.OrdinalIgnoreCase);
-
-        var tasks = request.Paths
-            .Select(p => _scanService.ScanPathAsync(p, cache, cancellationToken));
-
-        var results = await Task.WhenAll(tasks).ConfigureAwait(false);
+        var results = new List<ScanPathResult>(request.Paths.Count);
+        foreach (var path in request.Paths)
+        {
+            results.Add(await _scanService.ScanPathAsync(path, cache, cancellationToken)
+                .ConfigureAwait(false));
+        }
 
         var response = new ScanPathsResponse
         {

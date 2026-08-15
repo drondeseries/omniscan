@@ -1,9 +1,8 @@
-import logging
-import os
 import time
-
-from watchdog.events import FileSystemEventHandler
+import os
+import logging
 from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +20,10 @@ class PlexWatcher(FileSystemEventHandler):
             lid, _, _ = self.scanner.get_library_id_for_path(event.src_path)
             if lid:
                 self.scanner.trigger_scan(lid, event.src_path)
+
+    def on_modified(self, event):
+        if not event.is_directory:
+            self.scanner.submit_file_event("modified", event.src_path)
 
     def on_moved(self, event):
         if not event.is_directory:
@@ -46,7 +49,13 @@ class PlexWatcher(FileSystemEventHandler):
             # Mass Deletion Protection
             if lid and self.scanner.config.get("ABORT_ON_MASS_DELETION"):
                 threshold = self.scanner.config.get("DELETION_THRESHOLD", 50)
-                fc = self.scanner.library_files.get(lid, {})
+                with self.scanner.library_files_lock:
+                    fc = self.scanner.library_files.get(lid)
+                if not isinstance(fc, dict):
+                    logger.error(
+                        f"🛑 Cannot verify deleted directory contents for '{event.src_path}'. Aborting safely."
+                    )
+                    return
                 if isinstance(fc, dict):
                     norm_deleted = os.path.normpath(event.src_path)
                     count = sum(

@@ -69,7 +69,9 @@ class PlexScanner:
             except Exception as e:
                 logger.error(f"Failed to compile ignore patterns: {e}")
 
-        self.history = StuckFileTracker()
+        self.history = StuckFileTracker(
+            db_file=config.get("HISTORY_DB", "history.db"), config=config
+        )
         self.library_ids = {}
         self.library_paths = {}
         self.library_sections_cache = []
@@ -92,10 +94,12 @@ class PlexScanner:
         self.notify_buffer = []  # list of (path, data) waiting to be sent
         self.notify_buffer_since = None  # time.time() when the first item was buffered
         self.is_scanning = False  # Track if a full scan is currently running
+        self.stop_event = threading.Event()
         self.pending_files = (
             set()
         )  # Track files currently queued for scan to prevent duplicates
         self.pending_files_lock = threading.Lock()
+        self.scan_state_lock = threading.Lock()
 
         # Caching for Plex activities to prevent API spam
         self._activities_cache = None
@@ -940,7 +944,12 @@ class PlexScanner:
     def trigger_scan(self, library_id, folder_path, force=False, metadata=None):
         """Enqueue a library scan for a specific folder."""
         if force:
-            self._do_trigger_scan(library_id, folder_path)
+            self.scan_monitor_executor.submit(
+                self._do_trigger_scan,
+                library_id,
+                folder_path,
+                metadata=metadata,
+            )
             return
 
         # Start with the new metadata
@@ -1032,9 +1041,12 @@ class PlexScanner:
         last_gc = time.time()
         while True:
             try:
-                time.sleep(1)
+                if self.stop_event.wait(1):
+                    break
 
                 # Periodic memory cleanup
+                if self.stop_event.is_set():
+                    break
                 if time.time() - last_gc > 300:  # Every 5 minutes
                     gc.collect()
                     last_gc = time.time()
@@ -1067,7 +1079,18 @@ class PlexScanner:
                                     del self.pending_scans[key]
                                     continue
 
-                            to_trigger.append((library_id, folder_path, metadata))
+                            notification_data = self.pending_notifications.get(folder_path)
+                            to_trigger.append(
+                                (
+                                    library_id,
+                                    folder_path,
+                                    metadata,
+                                    {
+                                        "added": list((notification_data or {}).get("added", [])),
+                                        "deleted": list((notification_data or {}).get("deleted", [])),
+                                    },
+                                )
+                            )
                             del self.pending_scans[key]
 
                     # 2. Process Notifications that are ready
@@ -1117,13 +1140,13 @@ class PlexScanner:
                         self.notify_buffer = []
                         self.notify_buffer_since = None
 
-                for library_id, folder_path, metadata in to_trigger:
-                    # Submit to monitor executor so we don't block the queue loop
+                for library_id, folder_path, metadata, event_context in to_trigger:
                     self.scan_monitor_executor.submit(
                         self._do_trigger_scan,
                         library_id,
                         folder_path,
                         metadata=metadata,
+                        event_context=event_context,
                     )
             except Exception as e:
                 logger.error(f"Error in scan queue worker: {e}")
@@ -1305,7 +1328,7 @@ class PlexScanner:
         embed.set_footer(text="Omniscan Media Monitor")
         self._send_discord_embed(embed, event_type="update")
 
-    def _do_trigger_scan(self, library_id, folder_path, metadata=None):
+    def _do_trigger_scan(self, library_id, folder_path, metadata=None, event_context=None):
         """Actually trigger a library scan for a specific folder and wait for completion."""
         TRIGGERED_SCANS_TOTAL.inc()
         if self.config.get("DRY_RUN"):
@@ -1315,6 +1338,7 @@ class PlexScanner:
             return
 
         server_type = self.config.get("SERVER_TYPE", "plex")
+        event_context = event_context or {}
 
         # Log the metadata if it exists
         if metadata:
@@ -1327,16 +1351,26 @@ class PlexScanner:
 
         try:
             if server_type == "plex":
-                self._trigger_plex_scan(library_id, folder_path, metadata=metadata)
+                self._trigger_plex_scan(
+                    library_id,
+                    folder_path,
+                    metadata=metadata,
+                    event_context=event_context,
+                )
             elif server_type in ["jellyfin", "emby"]:
                 plugin_scan_success = self._trigger_jellyfin_emby_scan(
-                    library_id, folder_path, metadata=metadata
+                    library_id,
+                    folder_path,
+                    metadata=metadata,
+                    event_context=event_context,
                 )
 
                 # Only queue delayed post-scan processing if we fell back to the standard scan
                 if not plugin_scan_success:
                     added_files = []
-                    if folder_path in self.pending_notifications:
+                    if event_context.get("added"):
+                        added_files = event_context["added"]
+                    elif folder_path in self.pending_notifications:
                         added_files = self.pending_notifications[folder_path].get(
                             "added", []
                         )
@@ -1379,7 +1413,7 @@ class PlexScanner:
             # Recalculate missing files/counts in background
             self._trigger_cache_fill(library_id)
 
-    def _trigger_jellyfin_emby_scan(self, library_id, folder_path, metadata=None):
+    def _trigger_jellyfin_emby_scan(self, library_id, folder_path, metadata=None, event_context=None):
         """Tiered trigger: try ScanPath (targeted plugin) first per-file, then per-folder,
         then fallback to Media/Updated with scan monitoring."""
         server_type = self.config.get("SERVER_TYPE", "jellyfin")
@@ -1388,7 +1422,9 @@ class PlexScanner:
         # The targeted-scans plugin works best with exact file paths (walks tree up).
         # Collect all files that triggered this folder scan.
         added_files = []
-        if folder_path in self.pending_notifications:
+        if event_context and event_context.get("added"):
+            added_files = list(event_context["added"])
+        elif folder_path in self.pending_notifications:
             added_files = list(self.pending_notifications[folder_path].get("added", []))
 
         if added_files:
@@ -1566,7 +1602,9 @@ class PlexScanner:
         payload = {"Updates": [{"Path": folder_path, "UpdateType": update_type}]}
 
         try:
-            response = self.http_session.post(url, json=payload, headers=headers)
+            response = self.http_session.post(
+                url, json=payload, headers=headers, timeout=30
+            )
             response.raise_for_status()
             logger.info(
                 f"🔎 {self.config['SERVER_TYPE'].capitalize()} fallback scan triggered for: {BOLD}{folder_path}{RESET} (UpdateType: {update_type})"
@@ -1578,6 +1616,8 @@ class PlexScanner:
             logger.error(
                 f"Failed to trigger {self.config['SERVER_TYPE']} fallback scan: {e}"
             )
+            return False
+        return True
 
     def _is_jellyfin_emby_scanning(self):
         """Check if Jellyfin/Emby is currently scanning the media library by querying scheduled tasks."""
@@ -1633,7 +1673,7 @@ class PlexScanner:
 
             return []
 
-    def _trigger_plex_scan(self, library_id, folder_path, metadata=None):
+    def _trigger_plex_scan(self, library_id, folder_path, metadata=None, event_context=None):
         if not self.plex:
             try:
                 self.connect_to_plex(retry=False)
@@ -1652,7 +1692,7 @@ class PlexScanner:
         self.active_scan_events[library_id] = scan_event
 
         try:
-            response = self.http_session.get(url)
+            response = self.http_session.get(url, timeout=30)
             response.raise_for_status()
             logger.info(f"🔎 Plex scan triggered for: {BOLD}{folder_path}{RESET}")
             self.history.add_event("Scan Triggered", folder_path, "Plex")
@@ -1663,7 +1703,7 @@ class PlexScanner:
             ):
                 self._start_alert_listener()
 
-            max_wait = 600
+            max_wait = self.config.get("PLEX_SCAN_TIMEOUT", 600)
             start_wait = time.time()
             poll_interval = 1.0
 
@@ -1713,7 +1753,9 @@ class PlexScanner:
 
             # Trigger metadata refresh/analysis on newly added files
             added_files = []
-            if folder_path in self.pending_notifications:
+            if event_context and event_context.get("added"):
+                added_files = event_context["added"]
+            elif folder_path in self.pending_notifications:
                 added_files = self.pending_notifications[folder_path].get("added", [])
             if not added_files and metadata and metadata.get("event_type") == "added":
                 added_files = [folder_path]
@@ -1724,16 +1766,19 @@ class PlexScanner:
                         self._post_scan_process_file, fpath
                     )
 
-            # Empty trash if deletion event and empty_trash behaviour is enabled
+            # Empty trash only after a verified successful deletion scan.
             is_deletion = metadata and metadata.get("event_type") == "deleted"
-            if is_deletion and self.config.get("EMPTY_TRASH"):
+            scan_timed_out = time.time() - start_wait >= max_wait
+            if is_deletion and self.config.get("EMPTY_TRASH") and not scan_timed_out:
                 logger.info(f"🧹 Emptying Plex trash for library: {library_id}")
                 try:
                     trash_url = (
                         f"{self.plex._baseurl}/library/sections/{library_id}/emptyTrash"
                     )
                     trash_headers = {"X-Plex-Token": self.plex._token}
-                    trash_res = self.plex._session.put(trash_url, headers=trash_headers)
+                    trash_res = self.plex._session.put(
+                        trash_url, headers=trash_headers, timeout=30
+                    )
                     trash_res.raise_for_status()
                     logger.info(
                         f"✅ Plex trash emptied successfully for library: {library_id}"
@@ -1799,7 +1844,7 @@ class PlexScanner:
         if self.config.get("PLEX_ANALYZE"):
             try:
                 analyze_url = f"{baseurl}/library/metadata/{rating_key}/analyze?X-Plex-Token={token}"
-                res = self.plex._session.put(analyze_url)
+                res = self.plex._session.put(analyze_url, timeout=30)
                 res.raise_for_status()
                 logger.info(
                     f"⚡ Plex metadata analysis triggered for ratingKey: {rating_key}"
@@ -1812,7 +1857,7 @@ class PlexScanner:
         if self.config.get("PLEX_REFRESH"):
             try:
                 refresh_url = f"{baseurl}/library/metadata/{rating_key}/refresh?X-Plex-Token={token}"
-                res = self.plex._session.put(refresh_url)
+                res = self.plex._session.put(refresh_url, timeout=30)
                 res.raise_for_status()
                 logger.info(
                     f"⚡ Plex metadata refresh triggered for ratingKey: {rating_key}"
@@ -1864,7 +1909,9 @@ class PlexScanner:
             "ReplaceAllMetadata": "false",
         }
         try:
-            res = self.http_session.post(url, headers=headers, params=params)
+            res = self.http_session.post(
+                url, headers=headers, params=params, timeout=30
+            )
             res.raise_for_status()
             logger.info(
                 f"⚡ Jellyfin/Emby metadata refresh triggered for item ID: {item_id}"
@@ -1904,6 +1951,14 @@ class PlexScanner:
                 logger.debug(
                     f"Could not find Jellyfin/Emby item ID for newly scanned file: {file_path}"
                 )
+
+    def shutdown(self, timeout=10):
+        self.stop_event.set()
+        if self.plex_listener:
+            self.jellyfin_ws_stop.set()
+        for executor in (self.event_executor, self.scan_monitor_executor):
+            executor.shutdown(wait=False, cancel_futures=True)
+        self.http_session.close()
 
     def _post_scan_process_file_delayed(self, file_path, delay=10):
         """Perform post-scan actions after a delayed sleep."""
@@ -1972,7 +2027,7 @@ class PlexScanner:
 
     def submit_file_event(self, event_type, file_path, metadata=None):
         """Submit a file event for asynchronous processing."""
-        if event_type == "created" or event_type == "moved":
+        if event_type in {"created", "moved", "modified"}:
             self.event_executor.submit(self.scan_file, file_path, metadata=metadata)
         elif event_type == "deleted":
             self.event_executor.submit(self.handle_deletion, file_path)
@@ -1984,6 +2039,12 @@ class PlexScanner:
             tracker = self.history
 
         if self.is_ignored(file_path):
+            return
+
+        if tracker.is_quarantined(file_path):
+            logger.info(
+                f"⏭️ Skipping quarantined file until it changes: {file_path}"
+            )
             return
 
         if self.config["SYMLINK_CHECK"] and self.is_broken_symlink(file_path):
@@ -2023,6 +2084,7 @@ class PlexScanner:
                 )
                 if tracker:
                     tracker.add_event("Corrupt", file_path, reason)
+                    tracker.quarantine_integrity_failure(file_path, reason)
                 if stats:
                     stats.add_corrupt_item(file_path, reason)
                 return
@@ -2107,12 +2169,14 @@ class PlexScanner:
         # Check if the root scan path itself is accessible.
         # If the root of the scan is missing, the mount is likely down.
         scan_root = None
+        norm_f = os.path.normpath(file_path)
+        matching_roots = []
         for path in self.config["SCAN_PATHS"]:
             norm_p = os.path.normpath(path)
-            norm_f = os.path.normpath(file_path)
             if norm_f == norm_p or norm_f.startswith(norm_p + os.sep):
-                scan_root = path
-                break
+                matching_roots.append((len(norm_p), path))
+        if matching_roots:
+            scan_root = max(matching_roots)[1]
 
         if scan_root and not os.path.exists(scan_root):
             logger.warning(
@@ -2214,6 +2278,13 @@ class PlexScanner:
 
                 if self.is_in_library(file_path):
                     tracker.clear_entry(file_path)
+                    tracker.clear_integrity_quarantine(file_path)
+                    continue
+
+                if tracker.is_quarantined(file_path):
+                    logger.info(
+                        f"⏭️ Skipping quarantined file until it changes: {file_path}"
+                    )
                     continue
 
                 if self.config["SYMLINK_CHECK"] and self.is_broken_symlink(file_path):
@@ -2226,6 +2297,7 @@ class PlexScanner:
                         f"❌ File failed integrity validation ({reason}): {file_path}"
                     )
                     tracker.add_event("Corrupt", file_path, reason)
+                    tracker.quarantine_integrity_failure(file_path, reason)
                     stats.add_corrupt_item(file_path, reason)
                     continue
 
@@ -2271,13 +2343,13 @@ class PlexScanner:
                                 continue
 
                             try:
-                                if entry.is_dir(follow_symlinks=True):
+                                if entry.is_dir(follow_symlinks=False):
                                     if not self.is_ignored(
                                         entry.path
                                     ) and self.should_scan_directory(entry.path):
                                         dirs_to_process.append(entry.path)
                                 elif (
-                                    entry.is_file(follow_symlinks=True)
+                                    entry.is_file(follow_symlinks=False)
                                     and not skip_files
                                 ):
                                     files_batch.append(entry.path)
@@ -2312,11 +2384,11 @@ class PlexScanner:
     def run_scan(self, force_full=False):
         from .models import RunStats, StuckFileTracker
 
-        if self.is_scanning:
-            logger.warning("Scan already in progress, skipping...")
-            return
-
-        self.is_scanning = True
+        with self.scan_state_lock:
+            if self.is_scanning:
+                logger.warning("Scan already in progress, skipping...")
+                return
+            self.is_scanning = True
         try:
             stats = RunStats(self.config)
             tracker = StuckFileTracker(config=self.config)
@@ -2413,6 +2485,13 @@ class PlexScanner:
 
                                     if self.is_in_library(file_path):
                                         tracker.clear_entry(file_path)
+                                        tracker.clear_integrity_quarantine(file_path)
+                                        continue
+
+                                    if tracker.is_quarantined(file_path):
+                                        logger.info(
+                                            f"⏭️ Skipping quarantined file until it changes: {file_path}"
+                                        )
                                         continue
 
                                     if self.config[
@@ -2429,6 +2508,7 @@ class PlexScanner:
                                             f"❌ File failed integrity validation ({reason}): {file_path}"
                                         )
                                         tracker.add_event("Corrupt", file_path, reason)
+                                        tracker.quarantine_integrity_failure(file_path, reason)
                                         stats.add_corrupt_item(file_path, reason)
                                         continue
 
