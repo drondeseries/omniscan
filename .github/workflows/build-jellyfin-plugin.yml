@@ -51,8 +51,8 @@ jobs:
           path: dist/omniscan-jellyfin-plugin.zip
           retention-days: 30
 
-      - name: Upload release asset (on push to main)
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+      - name: Upload release asset (on push to main or master)
+        if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') && github.event_name == 'push'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: plugin-latest

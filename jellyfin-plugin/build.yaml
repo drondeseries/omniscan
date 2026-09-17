@@ -1,6 +1,6 @@
 name: "OmniscanPlugin"
 guid: "f47ac10b-58cc-4372-a567-0e02b2c3d479"
-version: "1.0.0.0"
+version: "1.1.0.0"
 targetAbi: "10.10.0.0"
 framework: "net8.0"
 owner: "omniscan"

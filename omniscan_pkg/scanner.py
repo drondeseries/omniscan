@@ -28,6 +28,7 @@ try:
 
     WEBSOCKET_SUPPORTED = True
 except ImportError:
+    websocket = None
     WEBSOCKET_SUPPORTED = False
 
 # ANSI escape codes for text formatting
@@ -292,18 +293,28 @@ class PlexScanner:
             # Jellyfin/Emby WS endpoint
             import json
 
+            token = self.config.get("API_KEY", "")
             server_type = self.config.get("SERVER_TYPE", "jellyfin").lower()
             ws_path = "/embywebsocket" if server_type == "emby" else "/socket"
             ws_endpoint = (
-                f"{ws_url}{ws_path}?api_key={self.config['API_KEY']}&deviceId=omniscan"
+                f"{ws_url}{ws_path}?api_key={token}&ApiKey={token}&token={token}&deviceId=omniscan"
             )
+            ws_headers = [
+                f"X-Emby-Token: {token}",
+                f"X-MediaBrowser-Token: {token}",
+                f'Authorization: MediaBrowser Client="Omniscan", Device="Omniscan", DeviceId="omniscan", Version="1.0.0", Token="{token}"',
+            ]
 
             logger.info(f"📡 Connecting to {server_type.capitalize()} WebSocket: {ws_url}{ws_path}")
 
             while not self.jellyfin_ws_stop.is_set():
                 try:
-                    # Using websocket-client to connect
-                    ws = websocket.create_connection(ws_endpoint, timeout=10)
+                    # Using websocket-client to connect with auth headers
+                    ws = websocket.create_connection(
+                        ws_endpoint,
+                        timeout=10,
+                        header=ws_headers,
+                    )
                     logger.info("✅ Connected to Jellyfin/Emby WebSocket")
 
                     while not self.jellyfin_ws_stop.is_set():
@@ -1526,10 +1537,11 @@ class PlexScanner:
         some Jellyfin versions (≥10.9) require the latter while older ones and Emby
         still accept the former.  Sending both is always safe.
         """
-        token = self.config["API_KEY"]
+        token = self.config.get("API_KEY", "")
         return {
             "X-Emby-Token": token,
-            "Authorization": f'MediaBrowser Token="{token}"',
+            "X-MediaBrowser-Token": token,
+            "Authorization": f'MediaBrowser Client="Omniscan", Device="Omniscan", DeviceId="omniscan", Version="1.0.0", Token="{token}"',
             "Accept": "application/json",
             "Content-Type": "application/json",
         }

@@ -182,6 +182,110 @@ class TestPlexScanner(unittest.TestCase):
                 "/data/broken.mkv", self.scanner.library_missing_files["1"]
             )
 
+    def test_jellyfin_headers_format(self):
+        self.scanner.config["API_KEY"] = "secret_test_token"
+        headers = self.scanner._get_jellyfin_headers()
+        self.assertEqual(headers["X-Emby-Token"], "secret_test_token")
+        self.assertEqual(headers["X-MediaBrowser-Token"], "secret_test_token")
+        self.assertIn('Token="secret_test_token"', headers["Authorization"])
+        self.assertIn('Client="Omniscan"', headers["Authorization"])
+        self.assertIn('DeviceId="omniscan"', headers["Authorization"])
+        self.assertEqual(headers["Accept"], "application/json")
+        self.assertEqual(headers["Content-Type"], "application/json")
+
+    @patch("omniscan_pkg.scanner.websocket")
+    def test_jellyfin_websocket_connection_headers(self, mock_ws):
+        self.scanner.config["SERVER_TYPE"] = "jellyfin"
+        self.scanner.config["SERVER_URL"] = "http://jellyfin.local:8096"
+        self.scanner.config["API_KEY"] = "my_api_token"
+
+        def side_effect(*args, **kwargs):
+            self.scanner.jellyfin_ws_stop.set()
+            raise Exception("Stop listener")
+
+        mock_ws.create_connection.side_effect = side_effect
+
+        with patch("time.sleep"):
+            self.scanner._start_jellyfin_alert_listener()
+
+        self.assertTrue(mock_ws.create_connection.called)
+        call_args, call_kwargs = mock_ws.create_connection.call_args
+        endpoint = call_args[0]
+        self.assertTrue(endpoint.startswith("ws://jellyfin.local:8096/socket"))
+        self.assertIn("api_key=my_api_token", endpoint)
+        self.assertIn("ApiKey=my_api_token", endpoint)
+        self.assertIn("token=my_api_token", endpoint)
+        self.assertIn("deviceId=omniscan", endpoint)
+
+        headers = call_kwargs.get("header")
+        self.assertIsNotNone(headers)
+        self.assertIn("X-Emby-Token: my_api_token", headers)
+        self.assertIn("X-MediaBrowser-Token: my_api_token", headers)
+        self.assertTrue(
+            any(
+                "Authorization: MediaBrowser" in h
+                and 'Token="my_api_token"' in h
+                and 'Client="Omniscan"' in h
+                for h in headers
+            )
+        )
+
+    @patch("omniscan_pkg.scanner.websocket")
+    def test_emby_websocket_connection_endpoint(self, mock_ws):
+        self.scanner.config["SERVER_TYPE"] = "emby"
+        self.scanner.config["SERVER_URL"] = "https://emby.local:8096"
+        self.scanner.config["API_KEY"] = "emby_token"
+
+        def side_effect(*args, **kwargs):
+            self.scanner.jellyfin_ws_stop.set()
+            raise Exception("Stop listener")
+
+        mock_ws.create_connection.side_effect = side_effect
+
+        with patch("time.sleep"):
+            self.scanner._start_jellyfin_alert_listener()
+
+        call_args, call_kwargs = mock_ws.create_connection.call_args
+        endpoint = call_args[0]
+        self.assertTrue(endpoint.startswith("wss://emby.local:8096/embywebsocket"))
+        self.assertIn("api_key=emby_token", endpoint)
+        self.assertIn("ApiKey=emby_token", endpoint)
+        self.assertIn("token=emby_token", endpoint)
+
+    @patch("omniscan_pkg.scanner.WEBSOCKET_SUPPORTED", False)
+    def test_jellyfin_websocket_unsupported(self):
+        self.scanner.config["SERVER_TYPE"] = "jellyfin"
+        self.scanner.config["SERVER_URL"] = "http://jellyfin.local:8096"
+        self.scanner.config["API_KEY"] = "my_api_token"
+        # Should return early cleanly without error
+        self.scanner._start_jellyfin_alert_listener()
+
+    def test_try_plugin_scan_success(self):
+        self.scanner.config["SERVER_URL"] = "http://jellyfin.local:8096"
+        self.scanner.config["API_KEY"] = "token123"
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "ItemId": "item-abc-123",
+            "Status": "Created",
+            "Message": "Created successfully",
+        }
+        with patch.object(
+            self.scanner.http_session, "post", return_value=mock_response
+        ) as mock_post, patch.object(
+            self.scanner.scan_monitor_executor, "submit"
+        ) as mock_submit:
+            res = self.scanner._try_plugin_scan("/media/movie.mkv", None)
+            self.assertTrue(res)
+            mock_post.assert_called_once()
+            args, kwargs = mock_post.call_args
+            self.assertEqual(args[0], "http://jellyfin.local:8096/Library/ScanPath")
+            self.assertEqual(kwargs["json"], {"Path": "/media/movie.mkv"})
+            self.assertIn("Authorization", kwargs["headers"])
+            mock_submit.assert_called_once_with(
+                self.scanner.refresh_jellyfin_item, "item-abc-123"
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

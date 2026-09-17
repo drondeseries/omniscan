@@ -2,6 +2,8 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
+using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Data.Enums;
@@ -37,6 +39,72 @@ public class TargetedScanService
     private readonly IProviderManager _providerManager;
     private readonly IFileSystem _fileSystem;
     private readonly ILogger<TargetedScanService> _logger;
+
+    private static readonly ConcurrentDictionary<Type, MethodInfo> _resolvePathMethods = new();
+
+    private static MethodInfo? FindResolvePathMethod(Type type)
+    {
+        var allMethods = type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
+            .Concat(type.GetInterfaces().SelectMany(i => i.GetMethods()));
+
+        return allMethods
+            .Where(m => (m.Name == "ResolvePath" || m.Name.EndsWith(".ResolvePath", StringComparison.Ordinal)) &&
+                        (m.ReturnType.Name == "BaseItem" || typeof(BaseItem).IsAssignableFrom(m.ReturnType)))
+            .OrderByDescending(m => m.GetParameters().Length)
+            .FirstOrDefault(m =>
+            {
+                var p = m.GetParameters();
+                return p.Length >= 2 &&
+                       (p[0].ParameterType.Name == "FileSystemMetadata" || p[0].ParameterType.IsAssignableFrom(typeof(FileSystemMetadata))) &&
+                       (p[1].ParameterType.Name == "Folder" || p[1].ParameterType.IsAssignableFrom(typeof(Folder)));
+            });
+    }
+
+    /// <summary>
+    /// Invokes <c>ILibraryManager.ResolvePath</c> using runtime reflection.
+    /// Works across all Jellyfin versions:
+    /// - Jellyfin 10.8-10.11: ResolvePath(FileSystemMetadata, Folder, IDirectoryService) [3 parameters]
+    /// - Jellyfin 12.0+: ResolvePath(FileSystemMetadata, Folder, IDirectoryService, CollectionType?) [4 parameters]
+    /// - Fallback: ResolvePath(FileSystemMetadata, Folder) [2 parameters]
+    /// </summary>
+    private BaseItem? ResolvePath(FileSystemMetadata fileSystemInfo, Folder parent)
+    {
+        var targetType = _libraryManager.GetType();
+        var method = _resolvePathMethods.GetOrAdd(targetType, t =>
+            FindResolvePathMethod(t) ??
+            FindResolvePathMethod(typeof(ILibraryManager)) ??
+            throw new MissingMethodException(nameof(ILibraryManager), "ResolvePath"));
+
+        var parameters = method.GetParameters();
+        var args = new object?[parameters.Length];
+        args[0] = fileSystemInfo;
+        args[1] = parent;
+        for (int i = 2; i < parameters.Length; i++)
+        {
+            if (typeof(IDirectoryService).IsAssignableFrom(parameters[i].ParameterType) ||
+                parameters[i].ParameterType.Name == "IDirectoryService")
+            {
+                args[i] = new DirectoryService(_fileSystem);
+            }
+            else if (parameters[i].HasDefaultValue)
+            {
+                args[i] = parameters[i].DefaultValue;
+            }
+            else
+            {
+                args[i] = null;
+            }
+        }
+
+        try
+        {
+            return (BaseItem?)method.Invoke(_libraryManager, args);
+        }
+        catch (TargetInvocationException tie) when (tie.InnerException is not null)
+        {
+            throw tie.InnerException;
+        }
+    }
 
     /// <summary>Initializes a new instance of <see cref="TargetedScanService"/>.</summary>
     public TargetedScanService(
@@ -232,7 +300,7 @@ public class TargetedScanService
             // ResolvePath asks Jellyfin to determine the correct item type
             // (Movie, Series, Season, Episode, …) based on the library's
             // naming rules and content type.
-            var resolvedItem = _libraryManager.ResolvePath(fileSystemInfo, parent);
+            var resolvedItem = ResolvePath(fileSystemInfo, parent);
             if (resolvedItem is null)
             {
                 _logger.LogWarning("OmniscanPlugin: ResolvePath returned null for: {Path}", path);
