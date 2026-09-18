@@ -36,9 +36,44 @@ def get_config_val(
     return val
 
 
-def normalize_emby_url(url, server_type):
-    """Return URL as-is without forcing /emby prefix."""
-    return url
+def normalize_emby_url(url, server_type=None):
+    """Return URL without trailing slashes or extra whitespace, without forcing /emby prefix."""
+    if not url:
+        return ""
+    return str(url).strip().rstrip("/")
+
+
+def get_jellyfin_headers(api_key=""):
+    """Build standard Jellyfin/Emby API headers.
+
+    Sends Authorization (MediaBrowser scheme with Client, Device, DeviceId, Version, Token),
+    X-MediaBrowser-Token, X-Emby-Authorization, and X-Emby-Token for 100% compliance across
+    all Jellyfin versions (including >=10.9 with legacy authorization disabled) and Emby.
+    """
+    token = (api_key or "").strip()
+    return {
+        "X-Emby-Token": token,
+        "X-MediaBrowser-Token": token,
+        "X-Emby-Authorization": f'MediaBrowser Client="Omniscan", Device="Omniscan", DeviceId="omniscan", Version="1.0.0", Token="{token}"',
+        "Authorization": f'MediaBrowser Client="Omniscan", Device="Omniscan", DeviceId="omniscan", Version="1.0.0", Token="{token}"',
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+
+
+def get_jellyfin_params(api_key=""):
+    """Build query parameters for Jellyfin/Emby authentication fallback.
+
+    Provides ApiKey (standard Jellyfin query parameter) and api_key (Emby / legacy Jellyfin)
+    as a fallback in case reverse proxies or intermediaries strip Authorization headers.
+    """
+    token = (api_key or "").strip()
+    if not token:
+        return {}
+    return {
+        "ApiKey": token,
+        "api_key": token,
+    }
 
 
 def load_config(config_path="config.ini"):

@@ -139,6 +139,158 @@ class TestWebHookAPI(unittest.TestCase):
         finally:
             app.dependency_overrides.pop(get_current_user, None)
 
+    @patch("omniscan_pkg.web.requests.get")
+    def test_connection_jellyfin_success(self, mock_get):
+        from omniscan_pkg.web import get_current_user
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.content = b'{"ServerName": "TestJellyfin", "Version": "10.9.11"}'
+        mock_resp.json.return_value = {"ServerName": "TestJellyfin", "Version": "10.9.11"}
+        mock_get.return_value = mock_resp
+
+        app.dependency_overrides[get_current_user] = lambda: "admin"
+        try:
+            payload = {
+                "server_type": "jellyfin",
+                "server_url": "http://jellyfin.local:8096/",
+                "api_key": "secret_api_key",
+                "plex_server": "",
+                "plex_token": "",
+                "scan_directories": "",
+                "scan_workers": 4,
+                "scan_debounce": 10,
+                "scan_delay": 0.0,
+                "watch_mode": False,
+                "run_interval": 24,
+                "run_on_startup": True,
+                "start_time": "",
+                "incremental_scan": False,
+                "scan_since_days": 7,
+                "symlink_check": False,
+                "empty_trash": False,
+                "deletion_threshold": 50,
+                "abort_on_mass_deletion": True,
+                "notifications_enabled": False,
+                "discord_webhook_url": "",
+                "notification_group_window": 15,
+                "ignore_patterns": "",
+                "log_level": "INFO",
+                "path_rewrites": "",
+                "integrity_check": False,
+                "ffprobe_check": False,
+            }
+            response = self.client.post("/api/test-connection", json=payload)
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(
+                response.json(),
+                {"status": "success", "message": "Linked to TestJellyfin (v10.9.11)"},
+            )
+
+            mock_get.assert_called_once()
+            called_url, called_kwargs = mock_get.call_args
+            # Ensure no double slashes in URL
+            self.assertEqual(called_url[0], "http://jellyfin.local:8096/System/Info")
+
+            # Check headers
+            headers = called_kwargs.get("headers", {})
+            self.assertEqual(headers.get("X-Emby-Token"), "secret_api_key")
+            self.assertEqual(headers.get("X-MediaBrowser-Token"), "secret_api_key")
+            self.assertIn('Token="secret_api_key"', headers.get("Authorization", ""))
+            self.assertIn('Client="Omniscan"', headers.get("Authorization", ""))
+            self.assertIn('DeviceId="omniscan"', headers.get("Authorization", ""))
+            self.assertIn('Token="secret_api_key"', headers.get("X-Emby-Authorization", ""))
+
+            # Check query params fallback
+            params = called_kwargs.get("params", {})
+            self.assertEqual(params.get("ApiKey"), "secret_api_key")
+            self.assertEqual(params.get("api_key"), "secret_api_key")
+        finally:
+            app.dependency_overrides.pop(get_current_user, None)
+
+    @patch("omniscan_pkg.web.requests.get")
+    def test_connection_jellyfin_failure(self, mock_get):
+        import requests
+        from omniscan_pkg.web import get_current_user
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 401
+        mock_resp.raise_for_status.side_effect = requests.HTTPError("401 Unauthorized")
+        mock_get.return_value = mock_resp
+
+        app.dependency_overrides[get_current_user] = lambda: "admin"
+        try:
+            payload = {
+                "server_type": "jellyfin",
+                "server_url": "http://jellyfin.local:8096",
+                "api_key": "wrong_key",
+                "plex_server": "",
+                "plex_token": "",
+                "scan_directories": "",
+                "scan_workers": 4,
+                "scan_debounce": 10,
+                "scan_delay": 0.0,
+                "watch_mode": False,
+                "run_interval": 24,
+                "run_on_startup": True,
+                "start_time": "",
+                "incremental_scan": False,
+                "scan_since_days": 7,
+                "symlink_check": False,
+                "empty_trash": False,
+                "deletion_threshold": 50,
+                "abort_on_mass_deletion": True,
+                "notifications_enabled": False,
+                "discord_webhook_url": "",
+                "notification_group_window": 15,
+                "ignore_patterns": "",
+                "log_level": "INFO",
+                "path_rewrites": "",
+                "integrity_check": False,
+                "ffprobe_check": False,
+            }
+            response = self.client.post("/api/test-connection", json=payload)
+            self.assertEqual(response.status_code, 400)
+            self.assertEqual(response.json()["status"], "error")
+            self.assertIn("401 Unauthorized", response.json()["message"])
+        finally:
+            app.dependency_overrides.pop(get_current_user, None)
+
+    @patch("omniscan_pkg.web.requests.get")
+    def test_check_connection_jellyfin(self, mock_get):
+        from omniscan_pkg.web import get_current_user
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.content = b'{"ServerName": "HomeJellyfin", "Version": "10.9.11"}'
+        mock_resp.json.return_value = {"ServerName": "HomeJellyfin", "Version": "10.9.11"}
+        mock_get.return_value = mock_resp
+
+        self.mock_scanner.config = {
+            "SERVER_TYPE": "jellyfin",
+            "SERVER_URL": "http://jellyfin.local:8096/",
+            "API_KEY": "configured_token",
+        }
+
+        app.dependency_overrides[get_current_user] = lambda: "admin"
+        try:
+            response = self.client.post("/api/check-connection")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(
+                response.json(),
+                {"status": "success", "message": "Online (HomeJellyfin v10.9.11)", "server": "Jellyfin"},
+            )
+
+            mock_get.assert_called_once()
+            called_url, called_kwargs = mock_get.call_args
+            self.assertEqual(called_url[0], "http://jellyfin.local:8096/System/Info")
+            headers = called_kwargs.get("headers", {})
+            self.assertIn('Token="configured_token"', headers.get("Authorization", ""))
+            params = called_kwargs.get("params", {})
+            self.assertEqual(params.get("ApiKey"), "configured_token")
+        finally:
+            app.dependency_overrides.pop(get_current_user, None)
+
 
 if __name__ == "__main__":
     unittest.main()

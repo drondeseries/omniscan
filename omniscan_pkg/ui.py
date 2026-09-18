@@ -9,7 +9,12 @@ import requests
 import configparser
 import logging
 import asyncio
-from .config import get_webhook_token, normalize_emby_url
+from .config import (
+    get_webhook_token,
+    normalize_emby_url,
+    get_jellyfin_headers,
+    get_jellyfin_params,
+)
 from datetime import datetime
 from collections import defaultdict
 from plexapi.server import PlexServer
@@ -1898,26 +1903,47 @@ def init_ui(app, scanner):
                 async def test_conn():
                     ui.notify("Testing connection...", type="info")
                     rt = unmask_v(plex_token.value, scanner.config.get("TOKEN", ""))
-                    rk = unmask_v(api_key.value, scanner.config.get("API_KEY", ""))
-                    ru = unmask_v(
-                        server_url.value, scanner.config.get("SERVER_URL", "")
+                    rk = unmask_v(api_key.value, scanner.config.get("API_KEY", "")).strip()
+                    ru = normalize_emby_url(
+                        unmask_v(server_url.value, scanner.config.get("SERVER_URL", "")),
+                        server_type.value,
                     )
                     try:
                         if server_type.value == "plex":
-                            plex = PlexServer(plex_url.value, rt)
+                            plex_u = (plex_url.value or "").strip().rstrip("/")
+                            plex = await asyncio.get_event_loop().run_in_executor(
+                                None, lambda: PlexServer(plex_u, rt)
+                            )
                             ui.notify(
                                 f"Connected successfully: {plex.friendlyName}",
                                 type="positive",
                             )
                         else:
-                            r = requests.get(
-                                f"{ru}/System/Info",
-                                headers={"X-Emby-Token": rk},
-                                timeout=5,
+                            headers = get_jellyfin_headers(rk)
+                            params = get_jellyfin_params(rk)
+
+                            def _check():
+                                res = requests.get(
+                                    f"{ru}/System/Info",
+                                    headers=headers,
+                                    params=params,
+                                    timeout=5,
+                                )
+                                res.raise_for_status()
+                                return res.json() if res.content else {}
+
+                            data = await asyncio.get_event_loop().run_in_executor(
+                                None, _check
                             )
-                            r.raise_for_status()
+                            server_name = data.get("ServerName") if isinstance(data, dict) else None
+                            version = data.get("Version") if isinstance(data, dict) else None
+                            msg = (
+                                f"Connected to {server_name} (v{version})"
+                                if server_name and version
+                                else (f"Connected to {server_name}" if server_name else f"Connected to {server_type.value.capitalize()}")
+                            )
                             ui.notify(
-                                f"Connected to {server_type.value.capitalize()}",
+                                msg,
                                 type="positive",
                             )
                     except Exception as ex:
@@ -2830,23 +2856,47 @@ def init_ui(app, scanner):
                         ui.notify("Testing connection...", type="info")
                         try:
                             if server_type_select.value == "plex":
-                                plex = PlexServer(
-                                    plex_server_field.value, plex_token_field.value
+                                plex_u = (plex_server_field.value or "").strip().rstrip("/")
+                                plex = await asyncio.get_event_loop().run_in_executor(
+                                    None,
+                                    lambda: PlexServer(
+                                        plex_u, (plex_token_field.value or "").strip()
+                                    ),
                                 )
                                 ui.notify(
                                     f"Connected successfully to Plex: {plex.friendlyName}",
                                     type="positive",
                                 )
                             else:
-                                h = {"X-Emby-Token": api_key_field.value}
-                                r = requests.get(
-                                    f"{server_url_field.value}/System/Info",
-                                    headers=h,
-                                    timeout=5,
+                                raw_u = normalize_emby_url(
+                                    server_url_field.value, server_type_select.value
                                 )
-                                r.raise_for_status()
+                                k = (api_key_field.value or "").strip()
+                                headers = get_jellyfin_headers(k)
+                                params = get_jellyfin_params(k)
+
+                                def _check():
+                                    res = requests.get(
+                                        f"{raw_u}/System/Info",
+                                        headers=headers,
+                                        params=params,
+                                        timeout=5,
+                                    )
+                                    res.raise_for_status()
+                                    return res.json() if res.content else {}
+
+                                data = await asyncio.get_event_loop().run_in_executor(
+                                    None, _check
+                                )
+                                server_name = data.get("ServerName") if isinstance(data, dict) else None
+                                version = data.get("Version") if isinstance(data, dict) else None
+                                msg = (
+                                    f"Connected successfully to {server_name} (v{version})"
+                                    if server_name and version
+                                    else (f"Connected successfully to {server_name}" if server_name else f"Connected successfully to {server_type_select.value.capitalize()}")
+                                )
                                 ui.notify(
-                                    f"Connected successfully to {server_type_select.value.capitalize()}",
+                                    msg,
                                     type="positive",
                                 )
                         except Exception as ex:
@@ -2918,12 +2968,18 @@ def init_ui(app, scanner):
                                         for location in section.locations:
                                             paths.append(location)
                                 else:
-                                    h = {"X-Emby-Token": api_key_field.value}
+                                    raw_u = normalize_emby_url(
+                                        server_url_field.value, server_type_select.value
+                                    )
+                                    k = (api_key_field.value or "").strip()
+                                    headers = get_jellyfin_headers(k)
+                                    params = get_jellyfin_params(k)
                                     r = await asyncio.get_event_loop().run_in_executor(
                                         None,
                                         lambda: requests.get(
-                                            f"{server_url_field.value}/Library/VirtualFolders",
-                                            headers=h,
+                                            f"{raw_u}/Library/VirtualFolders",
+                                            headers=headers,
+                                            params=params,
                                             timeout=5,
                                         ),
                                     )

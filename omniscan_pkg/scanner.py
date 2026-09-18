@@ -22,6 +22,7 @@ from .metrics import (
     PENDING_SCANS,
 )
 from .models import StuckFileTracker
+from .config import get_jellyfin_headers, get_jellyfin_params
 
 try:
     import websocket
@@ -568,10 +569,12 @@ class PlexScanner:
 
     def _get_jellyfin_libraries(self):
         """Fetch libraries from Jellyfin/Emby."""
-        url = f"{self.config['SERVER_URL']}/Library/VirtualFolders"
+        server_url = (self.config.get("SERVER_URL") or "").rstrip("/")
+        url = f"{server_url}/Library/VirtualFolders"
         headers = self._get_jellyfin_headers()
+        params = self._get_jellyfin_params()
         try:
-            res = self.http_session.get(url, headers=headers)
+            res = self.http_session.get(url, headers=headers, params=params)
             res.raise_for_status()
             data = res.json()
 
@@ -936,10 +939,12 @@ class PlexScanner:
             return False
 
         headers = self._get_jellyfin_headers()
+        params = self._get_jellyfin_params()
         try:
             filename = os.path.basename(file_path)
-            search_url = f"{self.config['SERVER_URL']}/Items?ParentId={library_id}&Recursive=true&Fields=Path&IncludeItemTypes=Movie,Episode,Audio,MusicVideo&searchTerm={quote(filename)}"
-            res = self.http_session.get(search_url, headers=headers, timeout=10)
+            server_url = (self.config.get("SERVER_URL") or "").rstrip("/")
+            search_url = f"{server_url}/Items?ParentId={library_id}&Recursive=true&Fields=Path&IncludeItemTypes=Movie,Episode,Audio,MusicVideo&searchTerm={quote(filename)}"
+            res = self.http_session.get(search_url, headers=headers, params=params, timeout=10)
             res.raise_for_status()
             items = res.json().get("Items", [])
 
@@ -970,9 +975,11 @@ class PlexScanner:
 
             while True:
                 # Fetch items in batches using StartIndex and Limit
-                url = f"{self.config['SERVER_URL']}/Items?ParentId={library_id}&Recursive=true&Fields=Path&IncludeItemTypes=Movie,Episode,Audio,MusicVideo,MusicAlbum&StartIndex={start_index}&Limit={batch_size}"
+                server_url = (self.config.get("SERVER_URL") or "").rstrip("/")
+                url = f"{server_url}/Items?ParentId={library_id}&Recursive=true&Fields=Path&IncludeItemTypes=Movie,Episode,Audio,MusicVideo,MusicAlbum&StartIndex={start_index}&Limit={batch_size}"
                 headers = self._get_jellyfin_headers()
-                res = self.http_session.get(url, headers=headers)
+                params = self._get_jellyfin_params()
+                res = self.http_session.get(url, headers=headers, params=params)
                 res.raise_for_status()
                 data = res.json()
                 items = data.get("Items", [])
@@ -1662,21 +1669,23 @@ class PlexScanner:
             with self.active_jellyfin_scan_lock:
                 self.active_jellyfin_scan_events.pop(folder_path, None)
 
-    def _get_jellyfin_headers(self):
+    def _get_jellyfin_headers(self, token=None):
         """Build the standard Jellyfin/Emby API headers.
 
-        Sends both X-Emby-Token and the MediaBrowser Authorization header because
-        some Jellyfin versions (≥10.9) require the latter while older ones and Emby
-        still accept the former.  Sending both is always safe.
+        Sends both X-Emby-Token, X-MediaBrowser-Token, and the MediaBrowser Authorization
+        header (with Client, Device, DeviceId, Version, Token) to ensure 100% compliance
+        with Jellyfin's CustomAuthenticationScheme across all versions (including >=10.9)
+        and Emby.
         """
-        token = self.config.get("API_KEY", "")
-        return {
-            "X-Emby-Token": token,
-            "X-MediaBrowser-Token": token,
-            "Authorization": f'MediaBrowser Client="Omniscan", Device="Omniscan", DeviceId="omniscan", Version="1.0.0", Token="{token}"',
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-        }
+        if token is None:
+            token = self.config.get("API_KEY", "")
+        return get_jellyfin_headers(token)
+
+    def _get_jellyfin_params(self, token=None):
+        """Build fallback query parameters for Jellyfin/Emby authentication."""
+        if token is None:
+            token = self.config.get("API_KEY", "")
+        return get_jellyfin_params(token)
 
     def _try_plugin_scan(self, path, metadata):
         """Try to use the Targeted Scan plugin (POST /Library/ScanPath).
@@ -1686,13 +1695,15 @@ class PlexScanner:
         any missing items (Series → Season → Episode) in one shot.
         Returns True only when the server confirms an ItemId was created/found.
         """
-        url = f"{self.config['SERVER_URL']}/Library/ScanPath"
+        server_url = (self.config.get("SERVER_URL") or "").rstrip("/")
+        url = f"{server_url}/Library/ScanPath"
         headers = self._get_jellyfin_headers()
+        params = self._get_jellyfin_params()
         payload = {"Path": path}
 
         try:
             response = self.http_session.post(
-                url, json=payload, headers=headers, timeout=30
+                url, json=payload, headers=headers, params=params, timeout=30
             )
             if response.status_code == 404:
                 # Plugin not installed — don't log an error, just fall through silently
@@ -1728,8 +1739,10 @@ class PlexScanner:
 
     def _fallback_trigger_scan(self, folder_path, metadata=None):
         """Fallback to standard Jellyfin/Emby Library/Media/Updated endpoint."""
-        url = f"{self.config['SERVER_URL']}/Library/Media/Updated"
+        server_url = (self.config.get("SERVER_URL") or "").rstrip("/")
+        url = f"{server_url}/Library/Media/Updated"
         headers = self._get_jellyfin_headers()
+        params = self._get_jellyfin_params()
 
         # Determine the update type (default to "Created" for safety)
         update_type = "Created"
@@ -1747,7 +1760,7 @@ class PlexScanner:
 
         try:
             response = self.http_session.post(
-                url, json=payload, headers=headers, timeout=30
+                url, json=payload, headers=headers, params=params, timeout=30
             )
             response.raise_for_status()
             logger.info(
@@ -1765,10 +1778,12 @@ class PlexScanner:
 
     def _is_jellyfin_emby_scanning(self):
         """Check if Jellyfin/Emby is currently scanning the media library by querying scheduled tasks."""
-        url = f"{self.config['SERVER_URL']}/ScheduledTasks"
+        server_url = (self.config.get("SERVER_URL") or "").rstrip("/")
+        url = f"{server_url}/ScheduledTasks"
         headers = self._get_jellyfin_headers()
+        params = self._get_jellyfin_params()
         try:
-            response = self.http_session.get(url, headers=headers, timeout=5)
+            response = self.http_session.get(url, headers=headers, params=params, timeout=5)
             if response.status_code == 200:
                 tasks = response.json()
                 for task in tasks:
@@ -2013,9 +2028,10 @@ class PlexScanner:
 
     def get_jellyfin_item_id(self, file_path):
         """Query Jellyfin/Emby API directly to get the item ID for a file path."""
-        url = f"{self.config['SERVER_URL']}/Items"
+        server_url = (self.config.get("SERVER_URL") or "").rstrip("/")
+        url = f"{server_url}/Items"
         headers = self._get_jellyfin_headers()
-        params = {"Path": file_path, "Fields": "Path"}
+        params = {"Path": file_path, "Fields": "Path", **self._get_jellyfin_params()}
         try:
             res = self.http_session.get(url, headers=headers, params=params, timeout=10)
             res.raise_for_status()
@@ -2026,8 +2042,8 @@ class PlexScanner:
 
             # Fallback to searching by filename if direct path lookup failed
             filename = os.path.basename(file_path)
-            search_url = f"{self.config['SERVER_URL']}/Items?Recursive=true&Fields=Path&searchTerm={quote(filename)}"
-            res = self.http_session.get(search_url, headers=headers, timeout=10)
+            search_url = f"{server_url}/Items?Recursive=true&Fields=Path&searchTerm={quote(filename)}"
+            res = self.http_session.get(search_url, headers=headers, params=self._get_jellyfin_params(), timeout=10)
             res.raise_for_status()
             items = res.json().get("Items", [])
             norm_file_path = os.path.normpath(file_path).lower()
@@ -2044,13 +2060,15 @@ class PlexScanner:
         """Trigger metadata refresh on Jellyfin/Emby for a specific item ID."""
         if not item_id:
             return
-        url = f"{self.config['SERVER_URL']}/Items/{item_id}/Refresh"
+        server_url = (self.config.get("SERVER_URL") or "").rstrip("/")
+        url = f"{server_url}/Items/{item_id}/Refresh"
         headers = self._get_jellyfin_headers()
         params = {
             "MetadataRefreshMode": "FullRefresh",
             "ImageRefreshMode": "FullRefresh",
             "ReplaceAllImages": "false",
             "ReplaceAllMetadata": "false",
+            **self._get_jellyfin_params(),
         }
         try:
             res = self.http_session.post(

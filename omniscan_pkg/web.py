@@ -30,7 +30,12 @@ from nicegui import ui, app as nicegui_app
 nicegui_app.config.socket_io_js_transports = ["polling", "websocket"]
 from plexapi.server import PlexServer
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
-from .config import get_webhook_token, normalize_emby_url
+from .config import (
+    get_webhook_token,
+    normalize_emby_url,
+    get_jellyfin_headers,
+    get_jellyfin_params,
+)
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from .webhook_parser import parse_webhook
 from .ui import init_ui
@@ -596,23 +601,31 @@ async def scan_library(r: LibraryScanRequest, u: str = Depends(get_current_user)
 @app.post("/api/test-connection")
 async def test_conn(s: SettingsUpdate, u: str = Depends(get_current_user)):
     rt = unmask_v(s.plex_token, scanner_instance.config.get("TOKEN", ""))
-    rk = unmask_v(s.api_key, scanner_instance.config.get("API_KEY", ""))
-    ru = unmask_v(s.server_url, scanner_instance.config.get("SERVER_URL", ""))
+    rk = unmask_v(s.api_key, scanner_instance.config.get("API_KEY", "")).strip()
+    ru = normalize_emby_url(
+        unmask_v(s.server_url, scanner_instance.config.get("SERVER_URL", "")),
+        s.server_type,
+    )
     try:
         if s.server_type == "plex":
             plex = PlexServer(s.plex_server, rt)
             return {"status": "success", "message": f"Linked to {plex.friendlyName}"}
         else:
-            _h = {
-                "X-Emby-Token": rk,
-                "Authorization": f'MediaBrowser Token="{rk}"',
-                "Accept": "application/json",
-            }
-            r = requests.get(f"{ru}/System/Info", headers=_h, timeout=5)
+            headers = get_jellyfin_headers(rk)
+            params = get_jellyfin_params(rk)
+            r = requests.get(f"{ru}/System/Info", headers=headers, params=params, timeout=5)
             r.raise_for_status()
+            data = r.json() if r.content else {}
+            server_name = data.get("ServerName") if isinstance(data, dict) else None
+            version = data.get("Version") if isinstance(data, dict) else None
+            msg = (
+                f"Linked to {server_name} (v{version})"
+                if server_name and version
+                else (f"Linked to {server_name}" if server_name else f"Linked to {s.server_type.capitalize()}")
+            )
             return {
                 "status": "success",
-                "message": f"Linked to {s.server_type.capitalize()}",
+                "message": msg,
             }
     except Exception as e:
         return JSONResponse({"status": "error", "message": str(e)}, status_code=400)
@@ -629,16 +642,23 @@ async def test_conn_unauth(s: SettingsUpdate, request: Request):
             plex = PlexServer(s.plex_server, s.plex_token)
             return {"status": "success", "message": f"Linked to {plex.friendlyName}"}
         else:
-            _h = {
-                "X-Emby-Token": s.api_key,
-                "Authorization": f'MediaBrowser Token="{s.api_key}"',
-                "Accept": "application/json",
-            }
-            r = requests.get(f"{s.server_url}/System/Info", headers=_h, timeout=5)
+            k = (s.api_key or "").strip()
+            ru = normalize_emby_url(s.server_url, s.server_type)
+            headers = get_jellyfin_headers(k)
+            params = get_jellyfin_params(k)
+            r = requests.get(f"{ru}/System/Info", headers=headers, params=params, timeout=5)
             r.raise_for_status()
+            data = r.json() if r.content else {}
+            server_name = data.get("ServerName") if isinstance(data, dict) else None
+            version = data.get("Version") if isinstance(data, dict) else None
+            msg = (
+                f"Linked to {server_name} (v{version})"
+                if server_name and version
+                else (f"Linked to {server_name}" if server_name else f"Linked to {s.server_type.capitalize()}")
+            )
             return {
                 "status": "success",
-                "message": f"Linked to {s.server_type.capitalize()}",
+                "message": msg,
             }
     except Exception as e:
         return JSONResponse({"status": "error", "message": str(e)}, status_code=400)
@@ -1078,14 +1098,21 @@ async def check_conn_status(u: str = Depends(get_current_user)):
                 "server": "Plex",
             }
         else:
-            h = {
-                "X-Emby-Token": token,
-                "Authorization": f'MediaBrowser Token="{token}"',
-                "Accept": "application/json",
-            }
-            r = requests.get(f"{url}/System/Info", headers=h, timeout=5)
+            k = (token or "").strip()
+            ru = normalize_emby_url(url, st)
+            headers = get_jellyfin_headers(k)
+            params = get_jellyfin_params(k)
+            r = requests.get(f"{ru}/System/Info", headers=headers, params=params, timeout=5)
             r.raise_for_status()
-            return {"status": "success", "message": "Online", "server": st.capitalize()}
+            data = r.json() if r.content else {}
+            server_name = data.get("ServerName") if isinstance(data, dict) else None
+            version = data.get("Version") if isinstance(data, dict) else None
+            msg = (
+                f"Online ({server_name} v{version})"
+                if server_name and version
+                else (f"Online ({server_name})" if server_name else "Online")
+            )
+            return {"status": "success", "message": msg, "server": st.capitalize()}
     except Exception as e:
         return JSONResponse({"status": "error", "message": str(e)}, status_code=400)
 
