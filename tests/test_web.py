@@ -97,6 +97,48 @@ class TestWebHookAPI(unittest.TestCase):
 
         asyncio.run(run_test())
 
+    @patch("builtins.open")
+    @patch("configparser.ConfigParser.write")
+    def test_update_settings_restarts_jellyfin_alert_listener(self, mock_write, mock_open):
+        from omniscan_pkg.web import get_current_user
+
+        app.dependency_overrides[get_current_user] = lambda: "admin"
+        try:
+            payload = {
+                "server_type": "Jellyfin",
+                "server_url": "http://jellyfin.local:8096",
+                "api_key": "test_token",
+                "plex_server": "",
+                "plex_token": "",
+                "scan_directories": "/media",
+                "scan_workers": 4,
+                "scan_debounce": 10,
+                "scan_delay": 0.0,
+                "watch_mode": False,
+                "run_interval": 24,
+                "run_on_startup": True,
+                "start_time": "",
+                "incremental_scan": False,
+                "scan_since_days": 7,
+                "symlink_check": False,
+                "empty_trash": False,
+                "deletion_threshold": 50,
+                "abort_on_mass_deletion": True,
+                "notifications_enabled": False,
+                "discord_webhook_url": "",
+                "notification_group_window": 15,
+                "ignore_patterns": "",
+                "log_level": "INFO",
+                "path_rewrites": "",
+                "integrity_check": False,
+                "ffprobe_check": False,
+            }
+            response = self.client.post("/api/settings", json=payload)
+            self.assertEqual(response.status_code, 200)
+            self.mock_scanner.restart_jellyfin_alert_listener.assert_called_once()
+        finally:
+            app.dependency_overrides.pop(get_current_user, None)
+
 
 if __name__ == "__main__":
     unittest.main()

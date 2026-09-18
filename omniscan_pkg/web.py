@@ -819,9 +819,13 @@ async def update_settings(s: SettingsUpdate, u: str = Depends(get_current_user))
         with open("config.ini", "w") as f:
             cfg.write(f)
 
-        if c["SERVER_TYPE"] == "plex":
+        st = (c.get("SERVER_TYPE") or "").lower()
+        if st == "plex":
             scanner_instance.connect_to_plex(retry=False)
             scanner_instance.get_library_ids()
+        elif st in ["jellyfin", "emby"]:
+            if hasattr(scanner_instance, "restart_jellyfin_alert_listener"):
+                scanner_instance.restart_jellyfin_alert_listener()
 
         return {"status": "success"}
     except Exception as e:

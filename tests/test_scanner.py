@@ -286,6 +286,211 @@ class TestPlexScanner(unittest.TestCase):
                 self.scanner.refresh_jellyfin_item, "item-abc-123"
             )
 
+    @patch("omniscan_pkg.scanner.websocket")
+    def test_jellyfin_websocket_empty_api_key_aborts(self, mock_ws):
+        self.scanner.config["SERVER_TYPE"] = "jellyfin"
+        self.scanner.config["SERVER_URL"] = "http://jellyfin.local:8096"
+        self.scanner.config["API_KEY"] = ""
+
+        with patch("omniscan_pkg.scanner.logger.warning") as mock_warn:
+            self.scanner._start_jellyfin_alert_listener()
+
+        self.assertFalse(mock_ws.create_connection.called)
+        self.assertIsNone(self.scanner.jellyfin_listener_thread)
+        mock_warn.assert_called_once()
+        self.assertIn("API_KEY is missing or empty", mock_warn.call_args[0][0])
+
+    @patch("omniscan_pkg.scanner.websocket")
+    def test_jellyfin_websocket_empty_server_url_aborts(self, mock_ws):
+        self.scanner.config["SERVER_TYPE"] = "jellyfin"
+        self.scanner.config["SERVER_URL"] = ""
+        self.scanner.config["API_KEY"] = "my_token"
+
+        with patch("omniscan_pkg.scanner.logger.warning") as mock_warn:
+            self.scanner._start_jellyfin_alert_listener()
+
+        self.assertFalse(mock_ws.create_connection.called)
+        self.assertIsNone(self.scanner.jellyfin_listener_thread)
+        mock_warn.assert_called_once()
+        self.assertIn("SERVER_URL is missing or empty", mock_warn.call_args[0][0])
+
+    @patch("omniscan_pkg.scanner.websocket")
+    def test_jellyfin_websocket_auth_error_exponential_backoff(self, mock_ws):
+        self.scanner.config["SERVER_TYPE"] = "jellyfin"
+        self.scanner.config["SERVER_URL"] = "http://jellyfin.local:8096"
+        self.scanner.config["API_KEY"] = "invalid_key"
+
+        class DummyBadStatus(Exception):
+            def __init__(self, msg, status_code):
+                super().__init__(msg)
+                self.status_code = status_code
+
+        delays_called = []
+
+        def mock_wait(delay):
+            delays_called.append(delay)
+            if len(delays_called) >= 3:
+                self.scanner.jellyfin_ws_stop.set()
+            return True
+
+        self.scanner.jellyfin_ws_stop.wait = mock_wait
+        mock_ws.create_connection.side_effect = DummyBadStatus(
+            "Handshake status 403 Forbidden", 403
+        )
+
+        with patch("omniscan_pkg.scanner.logger.error") as mock_err:
+            self.scanner._start_jellyfin_alert_listener()
+            self.scanner.jellyfin_listener_thread.join(timeout=3)
+
+        # Delays should be exponential starting at 30s: 30, 60, 120
+        self.assertEqual(delays_called, [30, 60, 120])
+        self.assertEqual(mock_err.call_count, 3)
+        self.assertIn(
+            "authentication failed (HTTP 403)", mock_err.call_args_list[0][0][0]
+        )
+        self.assertIn("Token rejected by server", mock_err.call_args_list[0][0][0])
+        self.assertIn("(attempt 1/5)", mock_err.call_args_list[0][0][0])
+        self.assertIn("(attempt 2/5)", mock_err.call_args_list[1][0][0])
+        self.assertIn("(attempt 3/5)", mock_err.call_args_list[2][0][0])
+
+    @patch("omniscan_pkg.scanner.websocket")
+    def test_jellyfin_websocket_auth_failure_limit_stops_listener(self, mock_ws):
+        self.scanner.config["SERVER_TYPE"] = "jellyfin"
+        self.scanner.config["SERVER_URL"] = "http://jellyfin.local:8096"
+        self.scanner.config["API_KEY"] = "permanently_invalid_key"
+
+        class DummyBadStatus(Exception):
+            def __init__(self, msg, status_code):
+                super().__init__(msg)
+                self.status_code = status_code
+
+        delays_called = []
+
+        def mock_wait(delay):
+            delays_called.append(delay)
+            return True
+
+        self.scanner.jellyfin_ws_stop.wait = mock_wait
+        mock_ws.create_connection.side_effect = DummyBadStatus(
+            "Handshake status 403 Forbidden", 403
+        )
+
+        with patch("omniscan_pkg.scanner.logger.error") as mock_err:
+            self.scanner._start_jellyfin_alert_listener()
+            self.scanner.jellyfin_listener_thread.join(timeout=3)
+
+        # 4 backoff waits: 30, 60, 120, 240, then 5th failure hits limit and breaks without waiting
+        self.assertEqual(delays_called, [30, 60, 120, 240])
+        self.assertEqual(mock_err.call_count, 5)
+        self.assertIn(
+            "stopped after 5 consecutive authentication failures",
+            mock_err.call_args_list[4][0][0],
+        )
+        self.assertTrue(self.scanner.jellyfin_ws_auth_failed)
+
+        # Verify subsequent scan-triggered starts are blocked
+        mock_ws.create_connection.reset_mock()
+        self.scanner._start_jellyfin_alert_listener()
+        self.assertFalse(mock_ws.create_connection.called)
+
+        # Verify restart clears auth failure and restarts
+        mock_ws.create_connection.side_effect = None
+        mock_conn = MagicMock()
+        mock_ws.create_connection.return_value = mock_conn
+        mock_conn.recv.side_effect = Exception("stop")
+        self.scanner.restart_jellyfin_alert_listener()
+        self.assertFalse(self.scanner.jellyfin_ws_auth_failed)
+        self.scanner.stop_jellyfin_alert_listener()
+
+    @patch("omniscan_pkg.scanner.websocket")
+    def test_jellyfin_websocket_token_url_encoding(self, mock_ws):
+        import urllib.parse
+        special_token = "token+with/special=chars&more"
+        self.scanner.config["SERVER_TYPE"] = "jellyfin"
+        self.scanner.config["SERVER_URL"] = "http://jellyfin.local:8096"
+        self.scanner.config["API_KEY"] = special_token
+
+        # Break connection on first call
+        mock_ws.create_connection.side_effect = ConnectionRefusedError("stop")
+
+        def mock_wait(delay):
+            self.scanner.jellyfin_ws_stop.set()
+            return True
+
+        self.scanner.jellyfin_ws_stop.wait = mock_wait
+        self.scanner._start_jellyfin_alert_listener()
+        self.scanner.jellyfin_listener_thread.join(timeout=3)
+
+        mock_ws.create_connection.assert_called_once()
+        call_url = mock_ws.create_connection.call_args[0][0]
+        headers = mock_ws.create_connection.call_args[1]["header"]
+
+        quoted = urllib.parse.quote(special_token)
+        self.assertIn(f"ApiKey={quoted}", call_url)
+        self.assertIn(f"api_key={quoted}", call_url)
+        self.assertIn("DeviceId=omniscan", call_url)
+        auth_header = next(h for h in headers if h.startswith("Authorization:"))
+        self.assertIn(f'Token="{quoted}"', auth_header)
+
+    def test_jellyfin_websocket_server_type_plex_aborts(self):
+        self.scanner.config["SERVER_TYPE"] = "plex"
+        self.scanner.config["SERVER_URL"] = "http://plex.local:32400"
+        self.scanner.config["API_KEY"] = "plex_key"
+
+        with patch("omniscan_pkg.scanner.websocket.create_connection") as mock_ws:
+            self.scanner._start_jellyfin_alert_listener()
+            self.assertFalse(mock_ws.called)
+            self.assertIsNone(self.scanner.jellyfin_listener_thread)
+
+    @patch("omniscan_pkg.scanner.websocket")
+    def test_jellyfin_websocket_connection_error_backoff(self, mock_ws):
+        self.scanner.config["SERVER_TYPE"] = "jellyfin"
+        self.scanner.config["SERVER_URL"] = "http://jellyfin.local:8096"
+        self.scanner.config["API_KEY"] = "valid_key"
+
+        delays_called = []
+
+        def mock_wait(delay):
+            delays_called.append(delay)
+            if len(delays_called) >= 3:
+                self.scanner.jellyfin_ws_stop.set()
+            return True
+
+        self.scanner.jellyfin_ws_stop.wait = mock_wait
+        mock_ws.create_connection.side_effect = ConnectionRefusedError(
+            "Connection refused"
+        )
+
+        with patch("omniscan_pkg.scanner.logger.warning") as mock_warn:
+            self.scanner._start_jellyfin_alert_listener()
+            self.scanner.jellyfin_listener_thread.join(timeout=3)
+
+        # Delays should be exponential starting at 5s: 5, 10, 20
+        self.assertEqual(delays_called, [5, 10, 20])
+        self.assertEqual(mock_warn.call_count, 3)
+        self.assertIn(
+            "connection error: Connection refused",
+            mock_warn.call_args_list[0][0][0],
+        )
+
+    def test_stop_and_restart_jellyfin_alert_listener(self):
+        self.scanner.config["SERVER_TYPE"] = "Jellyfin"  # Test case insensitivity
+        self.scanner.config["SERVER_URL"] = "http://jellyfin.local:8096"
+        self.scanner.config["API_KEY"] = "token123"
+
+        with patch.object(
+            self.scanner, "_start_jellyfin_alert_listener"
+        ) as mock_start:
+            self.scanner.restart_jellyfin_alert_listener()
+            mock_start.assert_called_once()
+
+    def test_shutdown_stops_jellyfin_alert_listener(self):
+        with patch.object(
+            self.scanner, "stop_jellyfin_alert_listener"
+        ) as mock_stop:
+            self.scanner.shutdown()
+            mock_stop.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -50,8 +50,11 @@ class PlexScanner:
         self.jellyfin_ws_stop = threading.Event()
         self.active_jellyfin_scan_events = {}
         self.active_jellyfin_scan_lock = threading.Lock()
+        self.jellyfin_ws_auth_failed = False
+        self._warned_missing_ws_token = False
+        self._warned_missing_ws_url = False
 
-        server_type = self.config.get("SERVER_TYPE", "plex")
+        server_type = (self.config.get("SERVER_TYPE") or "plex").lower()
         if server_type in ["jellyfin", "emby"]:
             if self.config.get("SERVER_URL") and self.config.get("API_KEY"):
                 self._start_jellyfin_alert_listener()
@@ -271,20 +274,49 @@ class PlexScanner:
             )
             return
 
+        server_type = (self.config.get("SERVER_TYPE") or "plex").lower()
+        if server_type not in ["jellyfin", "emby"]:
+            return
+
+        if getattr(self, "jellyfin_ws_auth_failed", False):
+            logger.debug(
+                f"{server_type.capitalize()} WebSocket alert listener is disabled due to previous authentication failures."
+            )
+            return
+
         if self.jellyfin_listener_thread and self.jellyfin_listener_thread.is_alive():
+            return
+
+        token = (self.config.get("API_KEY") or "").strip()
+        server_url = (self.config.get("SERVER_URL") or "").strip()
+
+        if not token:
+            if not getattr(self, "_warned_missing_ws_token", False):
+                logger.warning(
+                    f"⚠️ {server_type.capitalize()} WebSocket alert listener not started: API_KEY is missing or empty."
+                )
+                self._warned_missing_ws_token = True
+            return
+
+        if not server_url:
+            if not getattr(self, "_warned_missing_ws_url", False):
+                logger.warning(
+                    f"⚠️ {server_type.capitalize()} WebSocket alert listener not started: SERVER_URL is missing or empty."
+                )
+                self._warned_missing_ws_url = True
             return
 
         self.jellyfin_ws_stop.clear()
 
         def run_listener():
-            server_url = self.config["SERVER_URL"]
+            raw_url = (self.config.get("SERVER_URL") or "").strip()
             # Convert http:// or https:// to ws:// or wss://
-            if server_url.startswith("https://"):
-                ws_url = server_url.replace("https://", "wss://")
-            elif server_url.startswith("http://"):
-                ws_url = server_url.replace("http://", "ws://")
+            if raw_url.startswith("https://"):
+                ws_url = "wss://" + raw_url[len("https://"):]
+            elif raw_url.startswith("http://"):
+                ws_url = "ws://" + raw_url[len("http://"):]
             else:
-                logger.warning(f"Invalid server URL for websocket: {server_url}")
+                logger.warning(f"Invalid server URL for websocket: {raw_url}")
                 return
 
             # Remove trailing slash if present
@@ -292,22 +324,39 @@ class PlexScanner:
 
             # Jellyfin/Emby WS endpoint
             import json
+            import urllib.parse
 
-            token = self.config.get("API_KEY", "")
-            server_type = self.config.get("SERVER_TYPE", "jellyfin").lower()
-            ws_path = "/embywebsocket" if server_type == "emby" else "/socket"
-            ws_endpoint = (
-                f"{ws_url}{ws_path}?api_key={token}&ApiKey={token}&token={token}&deviceId=omniscan"
-            )
-            ws_headers = [
-                f"X-Emby-Token: {token}",
-                f"X-MediaBrowser-Token: {token}",
-                f'Authorization: MediaBrowser Client="Omniscan", Device="Omniscan", DeviceId="omniscan", Version="1.0.0", Token="{token}"',
-            ]
+            st = (self.config.get("SERVER_TYPE") or "jellyfin").lower()
+            ws_path = "/embywebsocket" if st == "emby" else "/socket"
 
-            logger.info(f"📡 Connecting to {server_type.capitalize()} WebSocket: {ws_url}{ws_path}")
+            logger.info(f"📡 Connecting to {st.capitalize()} WebSocket: {ws_url}{ws_path}")
+
+            consecutive_auth_errors = 0
+            max_auth_failures = 5
+            conn_delay = 5
+            max_conn_delay = 60
+            auth_delay = 30
+            max_auth_delay = 300
 
             while not self.jellyfin_ws_stop.is_set():
+                token = (self.config.get("API_KEY") or "").strip()
+                if not token:
+                    logger.warning(
+                        f"⚠️ {st.capitalize()} WebSocket alert listener stopped: API_KEY is empty."
+                    )
+                    break
+
+                quoted_token = urllib.parse.quote(token)
+                ws_endpoint = (
+                    f"{ws_url}{ws_path}?api_key={quoted_token}&ApiKey={quoted_token}&token={quoted_token}&deviceId=omniscan&DeviceId=omniscan"
+                )
+                ws_headers = [
+                    f"X-Emby-Token: {token}",
+                    f"X-MediaBrowser-Token: {token}",
+                    f'Authorization: MediaBrowser Client="Omniscan", Device="Omniscan", DeviceId="omniscan", Version="1.0.0", Token="{quoted_token}"',
+                ]
+
+                ws = None
                 try:
                     # Using websocket-client to connect with auth headers
                     ws = websocket.create_connection(
@@ -315,7 +364,10 @@ class PlexScanner:
                         timeout=10,
                         header=ws_headers,
                     )
-                    logger.info("✅ Connected to Jellyfin/Emby WebSocket")
+                    logger.info(f"✅ Connected to {st.capitalize()} WebSocket")
+                    conn_delay = 5
+                    consecutive_auth_errors = 0
+                    self.jellyfin_ws_auth_failed = False
 
                     while not self.jellyfin_ws_stop.is_set():
                         try:
@@ -336,7 +388,7 @@ class PlexScanner:
                                     and status == "Completed"
                                 ):
                                     logger.debug(
-                                        "🔔 WebSocket: Jellyfin/Emby scan complete event received"
+                                        f"🔔 WebSocket: {st.capitalize()} scan complete event received"
                                     )
                                     # Signal all pending Jellyfin scan events
                                     with self.active_jellyfin_scan_lock:
@@ -351,20 +403,100 @@ class PlexScanner:
                             except Exception:
                                 break
                         except Exception as e:
-                            logger.debug(f"Jellyfin WebSocket read error: {e}")
+                            logger.debug(f"{st.capitalize()} WebSocket read error: {e}")
                             break
-                    ws.close()
                 except Exception as e:
-                    logger.debug(f"Jellyfin WebSocket connection error: {e}")
+                    # Check for authentication failure (HTTP 401 Unauthorized or 403 Forbidden)
+                    is_auth_error = False
+                    status_code = getattr(e, "status_code", None)
+                    err_msg = str(e).lower()
+                    status_msg = getattr(e, "status_message", "") or ""
+                    resp_body = getattr(e, "resp_body", None)
+                    body_str = (
+                        resp_body.decode("utf-8", errors="ignore").lower()
+                        if isinstance(resp_body, (bytes, bytearray))
+                        else str(resp_body or "").lower()
+                    )
 
-                # Retry delay
-                if not self.jellyfin_ws_stop.is_set():
-                    time.sleep(5)
+                    if status_code in (401, 403):
+                        is_auth_error = True
+                    elif any(
+                        indicator in err_msg
+                        or indicator in status_msg.lower()
+                        or indicator in body_str
+                        for indicator in (
+                            "401",
+                            "403",
+                            "token is required",
+                            "invalid token",
+                            "forbidden",
+                            "unauthorized",
+                        )
+                    ):
+                        is_auth_error = True
+
+                    if is_auth_error:
+                        consecutive_auth_errors += 1
+                        status_str = f" (HTTP {status_code})" if status_code else ""
+
+                        if consecutive_auth_errors >= max_auth_failures:
+                            self.jellyfin_ws_auth_failed = True
+                            logger.error(
+                                f"🛑 {st.capitalize()} WebSocket alert listener stopped after {consecutive_auth_errors} "
+                                f"consecutive authentication failures{status_str}: {e}. "
+                                f"Token rejected by server ('Token is required' / 401 / 403). Please verify your API_KEY in config.ini or the web UI, "
+                                f"then save settings or restart the listener."
+                            )
+                            break
+
+                        current_delay = min(
+                            auth_delay * (2 ** (consecutive_auth_errors - 1)),
+                            max_auth_delay,
+                        )
+                        logger.error(
+                            f"❌ {st.capitalize()} WebSocket authentication failed{status_str}: {e}. "
+                            f"Token rejected by server ('Token is required' / 401 / 403). Please verify your API_KEY in config.ini. "
+                            f"Backing off reconnect for {current_delay}s (attempt {consecutive_auth_errors}/{max_auth_failures})."
+                        )
+                        self.jellyfin_ws_stop.wait(current_delay)
+                        continue
+                    else:
+                        logger.warning(
+                            f"⚠️ {st.capitalize()} WebSocket connection error: {e}. "
+                            f"Retrying in {conn_delay}s..."
+                        )
+                        current_delay = conn_delay
+                        conn_delay = min(conn_delay * 2, max_conn_delay)
+                        self.jellyfin_ws_stop.wait(current_delay)
+                        continue
+                finally:
+                    if ws:
+                        try:
+                            ws.close()
+                        except Exception:
+                            pass
 
         self.jellyfin_listener_thread = threading.Thread(
             target=run_listener, daemon=True
         )
         self.jellyfin_listener_thread.start()
+
+    def stop_jellyfin_alert_listener(self):
+        """Stop the Jellyfin/Emby alert listener thread cleanly."""
+        if hasattr(self, "jellyfin_ws_stop") and self.jellyfin_ws_stop:
+            self.jellyfin_ws_stop.set()
+        if self.jellyfin_listener_thread and self.jellyfin_listener_thread.is_alive():
+            self.jellyfin_listener_thread.join(timeout=2)
+        self.jellyfin_listener_thread = None
+
+    def restart_jellyfin_alert_listener(self):
+        """Safely stop and restart the Jellyfin/Emby alert listener thread."""
+        self.jellyfin_ws_auth_failed = False
+        self._warned_missing_ws_token = False
+        self._warned_missing_ws_url = False
+        self.stop_jellyfin_alert_listener()
+        if (self.config.get("SERVER_TYPE") or "").lower() in ["jellyfin", "emby"]:
+            self._start_jellyfin_alert_listener()
 
     def is_ignored(self, file_path):
         """Check if file matches any ignore pattern using compiled regex."""
@@ -1967,7 +2099,11 @@ class PlexScanner:
     def shutdown(self, timeout=10):
         self.stop_event.set()
         if self.plex_listener:
-            self.jellyfin_ws_stop.set()
+            try:
+                self.plex_listener.stop()
+            except Exception:
+                pass
+        self.stop_jellyfin_alert_listener()
         for executor in (self.event_executor, self.scan_monitor_executor):
             executor.shutdown(wait=False, cancel_futures=True)
         self.http_session.close()
