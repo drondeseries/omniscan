@@ -648,6 +648,36 @@ class TestIssue8Regression(unittest.TestCase):
         for _ in range(4):
             self.scanner._provider_ids_inflight.release()
 
+    def test_get_provider_ids_releases_permit_on_thread_start_raise(self):
+        """Permit must not leak when Thread.start() itself raises."""
+        import threading
+
+        real_thread_cls = threading.Thread
+
+        class StartFailsThread:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def start(self):
+                raise OSError("cannot start thread")
+
+            def is_alive(self):
+                return False
+
+        with patch(
+            "omniscan_pkg.scanner.threading.Thread", StartFailsThread
+        ):
+            self.assertEqual(
+                self.scanner.get_jellyfin_item_provider_ids("item-abc", timeout=5),
+                {},
+            )
+        for _ in range(4):
+            self.assertTrue(
+                self.scanner._provider_ids_inflight.acquire(blocking=False)
+            )
+        for _ in range(4):
+            self.scanner._provider_ids_inflight.release()
+
     def test_try_plugin_scan_item_id_submits_no_python_refresh(self):
         """Single refresh owner: plugin ItemId => no Python refresh submitted."""
         mock_resp = MagicMock()

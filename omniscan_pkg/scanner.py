@@ -2278,8 +2278,9 @@ class PlexScanner:
         from urllib.parse import urlencode
 
         # Ownership of the inflight slot transfers to this worker at entry:
-        # the outermost try/finally covers ALL setup (URL build, pool
-        # construction) so no exception path can leak the permit.
+        # setup (URL build, pool construction) runs in its own guarded block
+        # that releases on failure, and everything after is covered by the
+        # outer try/finally — so no exception path can leak the permit.
         try:
             url = f"{server_url}/Items/{item_id}?{urlencode(params)}"
             http = urllib3.PoolManager(
