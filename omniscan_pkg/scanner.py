@@ -2217,6 +2217,9 @@ class PlexScanner:
         # Admission control: bound outstanding live I/O. The slot is held
         # until the worker truly exits (released in the worker's finally),
         # so this caps threads + sockets + buffers, not just bookkeeping.
+        # Permit ownership is exception-safe: released on any failure before
+        # the worker thread takes ownership (worker releases in its own
+        # outermost finally once started).
         acquired = self._provider_ids_inflight.acquire(blocking=False)
         if not acquired:
             logger.debug(
@@ -2224,16 +2227,24 @@ class PlexScanner:
                 f"inflight); skipping for item {item_id}."
             )
             return {}
-        headers = self._get_jellyfin_headers()
-        params = {"Fields": "ProviderIds", **self._get_jellyfin_params()}
-        box: dict = {}
-        worker = threading.Thread(
-            target=self._fetch_provider_ids_thread,
-            args=(server_url, item_id, headers, params, timeout, box),
-            daemon=True,
-            name=f"omniscan-providerids-{item_id[:8]}",
-        )
-        worker.start()
+        try:
+            headers = self._get_jellyfin_headers()
+            params = {"Fields": "ProviderIds", **self._get_jellyfin_params()}
+            box: dict = {}
+            worker = threading.Thread(
+                target=self._fetch_provider_ids_thread,
+                args=(server_url, item_id, headers, params, timeout, box),
+                daemon=True,
+                name=f"omniscan-providerids-{item_id[:8]}",
+            )
+            worker.start()
+        except Exception as e:
+            # Thread construction/start failed: worker never took ownership,
+            # so the caller must release the permit (else 4 failures would
+            # permanently disable lookups with no live workers).
+            self._provider_ids_inflight.release()
+            logger.debug(f"ProviderIds lookup setup failed for item {item_id}: {e}")
+            return {}
         worker.join(timeout=timeout)
         if worker.is_alive():
             # Still trickling past the total deadline: abandon it. The slot
@@ -2266,13 +2277,21 @@ class PlexScanner:
         import urllib3
         from urllib.parse import urlencode
 
-        url = f"{server_url}/Items/{item_id}?{urlencode(params)}"
-        http = urllib3.PoolManager(
-            num_pools=1,
-            maxsize=1,
-            timeout=urllib3.Timeout(connect=min(timeout, 5.0), read=timeout),
-            retries=False,
-        )
+        # Ownership of the inflight slot transfers to this worker at entry:
+        # the outermost try/finally covers ALL setup (URL build, pool
+        # construction) so no exception path can leak the permit.
+        try:
+            url = f"{server_url}/Items/{item_id}?{urlencode(params)}"
+            http = urllib3.PoolManager(
+                num_pools=1,
+                maxsize=1,
+                timeout=urllib3.Timeout(connect=min(timeout, 5.0), read=timeout),
+                retries=False,
+            )
+        except Exception as e:
+            logger.debug(f"ProviderIds worker setup failed for item {item_id}: {e}")
+            self._provider_ids_inflight.release()
+            return
         try:
             resp = http.request(
                 "GET", url, headers=dict(headers or {}), preload_content=False

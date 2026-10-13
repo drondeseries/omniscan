@@ -496,32 +496,45 @@ class TestIssue8Regression(unittest.TestCase):
 
     def test_get_provider_ids_trickle_server_bounded_and_recovers(self):
         """Live trickle server: callers return in budget, slots bounded,
-        lookups succeed after the trickle stops."""
+        permits return via real worker exits, lookups succeed after."""
         import http.server
         import json
         import threading
 
-        mode = {"trickle": True}
+        # Shared, closable trickle connections: the handler keeps each
+        # trickle response open, sending 1 byte every 0.2s (faster than any
+        # read timeout) until told to stop — workers stay genuinely alive
+        # past their caller deadlines, defeating inactivity timeouts.
+        state = {"trickle": True, "conns": [], "lock": threading.Lock()}
 
         class Handler(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
             def do_GET(self):
-                if mode["trickle"]:
-                    # Headers now, body never: trickles forever.
-                    body = json.dumps(
-                        {"ProviderIds": {"Tmdb": "1"}}
-                    ).encode()
+                if state["trickle"]:
+                    body_len = 10 * 1024 * 1024  # 10MB declared, dripped slowly
                     self.send_response(200)
                     self.send_header("Content-Type", "application/json")
-                    self.send_header("Content-Length", str(len(body) + 100))
+                    self.send_header("Content-Length", str(body_len))
                     self.end_headers()
+                    with state["lock"]:
+                        state["conns"].append(self.wfile)
                     try:
-                        self.wfile.write(body[: len(body) // 2])
-                        self.wfile.flush()
-                        import time as _t
+                        while state["trickle"]:
+                            try:
+                                self.wfile.write(b"x")
+                                self.wfile.flush()
+                            except Exception:
+                                break
+                            import time as _t
 
-                        _t.sleep(30)
-                    except Exception:
-                        pass
+                            _t.sleep(0.2)
+                    finally:
+                        with state["lock"]:
+                            try:
+                                state["conns"].remove(self.wfile)
+                            except ValueError:
+                                pass
                     return
                 payload = json.dumps(
                     {"ProviderIds": {"Tmdb": "1302904"}}
@@ -539,6 +552,7 @@ class TestIssue8Regression(unittest.TestCase):
                 pass
 
         server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        server.daemon_threads = True
         port = server.server_address[1]
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -547,46 +561,92 @@ class TestIssue8Regression(unittest.TestCase):
         try:
             import time as _time
 
-            # Repeated trickle timeouts: each returns {} within budget…
-            for _ in range(6):
+            # Phase 1: fill all 4 slots with genuinely-alive trickle workers.
+            for _ in range(4):
                 start = _time.monotonic()
                 self.assertEqual(
                     self.scanner.get_jellyfin_item_provider_ids(
-                        "item-abc", timeout=0.5
+                        "item-abc", timeout=1.0
                     ),
                     {},
                 )
-                self.assertLess(_time.monotonic() - start, 5)
-            # …live worker count never exceeds the cap…
+                # Tight bound: 1.0s budget must return in ~1s, not ~5s.
+                self.assertLess(_time.monotonic() - start, 2.5)
+            # Give workers a beat to block inside their reads.
+            _time.sleep(0.5)
+            # Phase 2: saturated — 5th+ lookups spawn NO worker, return fast.
+            with patch(
+                "omniscan_pkg.scanner.threading.Thread"
+            ) as mock_thread:
+                start = _time.monotonic()
+                self.assertEqual(
+                    self.scanner.get_jellyfin_item_provider_ids(
+                        "item-abc", timeout=5
+                    ),
+                    {},
+                )
+                self.assertLess(_time.monotonic() - start, 1.0)
+                mock_thread.assert_not_called()
             live = sum(
                 1
                 for t in threading.enumerate()
                 if t.name.startswith("omniscan-providerids-") and t.is_alive()
             )
             self.assertLessEqual(live, 4)
-            # …and once the server responds, lookups succeed again.
-            mode["trickle"] = False
-            import time as _t2
-
-            _t2.sleep(0.2)
-            # Free spent slots deterministically: abandoned trickle workers
-            # still hold theirs; wait for saturation to clear is NOT needed
-            # because fresh slots… instead drain by releasing held ones.
-            # (Workers from trickle mode hold 6 slots max 4 -> saturated.)
-            # Release all to simulate worker exit, then verify success path.
-            for _ in range(4):
+            # Phase 3: stop the trickle — workers' reads fail, workers exit,
+            # permits return through REAL worker exits (no manual release).
+            state["trickle"] = False
+            with state["lock"]:
+                conns = list(state["conns"])
+            for wfile in conns:
                 try:
-                    self.scanner._provider_ids_inflight.release()
+                    wfile.close()
                 except Exception:
                     pass
+            deadline = _time.monotonic() + 15
+            while _time.monotonic() < deadline:
+                live = sum(
+                    1
+                    for t in threading.enumerate()
+                    if t.name.startswith("omniscan-providerids-")
+                    and t.is_alive()
+                )
+                if live == 0:
+                    break
+                _time.sleep(0.2)
+            self.assertEqual(
+                live,
+                0,
+                "trickle workers did not exit after connections closed",
+            )
+            # Phase 4: permits genuinely restored — lookup succeeds.
             self.assertEqual(
                 self.scanner.get_jellyfin_item_provider_ids("item-abc", timeout=5),
                 {"Tmdb": "1302904"},
             )
         finally:
+            state["trickle"] = False
             self.scanner.config["SERVER_URL"] = old_url
             server.shutdown()
             thread.join(timeout=5)
+
+    def test_get_provider_ids_releases_permit_on_thread_start_failure(self):
+        """Permit must not leak when worker thread construction fails."""
+        with patch(
+            "omniscan_pkg.scanner.threading.Thread",
+            side_effect=RuntimeError("no threads"),
+        ):
+            self.assertEqual(
+                self.scanner.get_jellyfin_item_provider_ids("item-abc", timeout=5),
+                {},
+            )
+        # Slot restored: a normal lookup path still has full capacity.
+        for _ in range(4):
+            self.assertTrue(
+                self.scanner._provider_ids_inflight.acquire(blocking=False)
+            )
+        for _ in range(4):
+            self.scanner._provider_ids_inflight.release()
 
     def test_try_plugin_scan_item_id_submits_no_python_refresh(self):
         """Single refresh owner: plugin ItemId => no Python refresh submitted."""
