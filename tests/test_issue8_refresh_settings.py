@@ -291,6 +291,61 @@ class TestIssue8Regression(unittest.TestCase):
         ), patch("time.sleep"):
             self.assertFalse(self.scanner.wait_for_jellyfin_identification("item-abc", max_attempts=2))
 
+    def test_wait_for_identification_enforces_deadline_before_attempt(self):
+        """No HTTP lookup may start once the deadline has passed."""
+        with patch.object(
+            self.scanner, "get_jellyfin_item_provider_ids"
+        ) as mock_ids, patch("time.sleep"), patch(
+            "omniscan_pkg.scanner.time.monotonic", return_value=1000.0
+        ):
+            # monotonic == deadline start + 15s budget already consumed
+            self.scanner.wait_for_jellyfin_identification(
+                "item-abc", max_attempts=5, max_wait_seconds=0
+            )
+            mock_ids.assert_not_called()
+
+    def test_wait_for_identification_rejects_result_after_deadline(self):
+        """Provider IDs arriving after the deadline must not trigger refresh."""
+        calls = {"n": 0}
+
+        def slow_lookup(item_id, timeout=None):
+            calls["n"] += 1
+            return {"Tmdb": "1302904"}
+
+        # First monotonic: deadline computation; second: pre-attempt check
+        # (within budget); third: post-result check (past deadline).
+        times = iter([1000.0, 1005.0, 1020.0])
+
+        with patch.object(
+            self.scanner, "get_jellyfin_item_provider_ids", side_effect=slow_lookup
+        ), patch("time.sleep"), patch(
+            "omniscan_pkg.scanner.time.monotonic", side_effect=lambda: next(times)
+        ):
+            self.assertFalse(
+                self.scanner.wait_for_jellyfin_identification(
+                    "item-abc", max_attempts=5, max_wait_seconds=15
+                )
+            )
+            self.assertEqual(calls["n"], 1)
+
+    def test_wait_for_identification_passes_remaining_budget_as_timeout(self):
+        """Each lookup's HTTP timeout is capped to the remaining deadline."""
+        seen = {}
+
+        def capture_timeout(item_id, timeout=None):
+            seen["timeout"] = timeout
+            return {}
+
+        with patch.object(
+            self.scanner, "get_jellyfin_item_provider_ids", side_effect=capture_timeout
+        ), patch("time.sleep"), patch(
+            "omniscan_pkg.scanner.time.monotonic", return_value=1000.0
+        ):
+            self.scanner.wait_for_jellyfin_identification(
+                "item-abc", max_attempts=1, max_wait_seconds=7
+            )
+            self.assertEqual(seen["timeout"], 7)
+
     def test_wait_for_identification_no_trailing_sleep_and_deadline_capped(self):
         """No sleep after the final attempt; total wait capped by deadline."""
         import omniscan_pkg.scanner as scanner_mod

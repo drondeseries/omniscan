@@ -2148,14 +2148,15 @@ class PlexScanner:
             logger.error(f"Error getting Jellyfin/Emby item ID for {file_path}: {e}")
             return None
 
-    def get_jellyfin_item_provider_ids(self, item_id):
+    def get_jellyfin_item_provider_ids(self, item_id, timeout=10):
         """Fetch the ProviderIds dict for a Jellyfin/Emby item.
 
         Returns the ProviderIds mapping (e.g. {"Tmdb": "1302904"}) or an
         empty dict when the item has no remote-provider identification yet.
         Used to avoid firing a metadata refresh before Jellyfin has
         identified the item — refreshing an unidentified item only
-        re-persists filename-derived values.
+        re-persists filename-derived values. timeout caps the single HTTP
+        operation; callers pass the remaining deadline budget.
         """
         server_url = (self.config.get("SERVER_URL") or "").rstrip("/")
         if not server_url or not item_id:
@@ -2167,7 +2168,7 @@ class PlexScanner:
                 f"{server_url}/Items/{item_id}",
                 headers=headers,
                 params=params,
-                timeout=10,
+                timeout=timeout,
             )
             res.raise_for_status()
             data = res.json()
@@ -2184,16 +2185,28 @@ class PlexScanner:
         before identification completes leaves filename-derived metadata
         (title, overview) in place, since there is no remote entry to merge.
         Runs on the shared scan_monitor_executor via its callers, so the wait
-        is bounded: no trailing sleep after the final attempt and an overall
-        deadline (default 15s) caps total blocking time on the pool.
-        Returns True when ProviderIds are present, False on timeout — callers
-        must NOT refresh when False (skip and log instead of refreshing
-        anyway).
+        is bounded: the deadline is enforced before every attempt (each HTTP
+        lookup gets only the remaining budget as its timeout), there is no
+        trailing sleep after the final attempt, and a result arriving after
+        the deadline is rejected. Returns True when ProviderIds are present
+        within budget, False on timeout — callers must NOT refresh when
+        False (skip and log instead of refreshing anyway).
         """
         deadline = time.monotonic() + max_wait_seconds
         for attempt in range(max_attempts):
-            provider_ids = self.get_jellyfin_item_provider_ids(item_id)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            # Each lookup may use only the remaining budget, so one slow
+            # request cannot push total blocking past the deadline.
+            provider_ids = self.get_jellyfin_item_provider_ids(
+                item_id, timeout=remaining
+            )
             if provider_ids:
+                # Reject results that arrived after the deadline: identification
+                # late enough to race the refresh is not a reliable basis for it.
+                if time.monotonic() > deadline:
+                    break
                 return True
             if attempt >= max_attempts - 1:
                 break
