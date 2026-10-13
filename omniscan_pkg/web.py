@@ -1202,7 +1202,11 @@ async def webhook_trigger(request: Request, apikey: Optional[str] = None):
                 for root in scan_roots
             )
             if not allowed:
-                logger.warning("Rejected webhook path outside configured scan roots")
+                logger.warning(
+                    f"Rejected webhook path outside configured scan roots: {p} "
+                    f"(scan roots: {scan_roots}). If this path belongs to a library, "
+                    "add its root to SCAN_PATHS or configure a PATH_REWRITES mapping."
+                )
                 continue
             p = normalized
             logger.info(f"Webhook trigger for: {p}")

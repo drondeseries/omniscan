@@ -1724,10 +1724,16 @@ class PlexScanner:
                     f"🔎 Targeted plugin scan successful for: {BOLD}{path}{RESET} (ItemId: {item_id})"
                 )
                 if self.config.get("PLEX_REFRESH"):
-                    # Kick off metadata refresh when user setting is enabled
-                    self.scan_monitor_executor.submit(
-                        self.refresh_jellyfin_item, item_id
-                    )
+                    # Kick off metadata refresh when user setting is enabled.
+                    # Wait for provider identification first so the refresh
+                    # merges remote metadata instead of re-persisting
+                    # filename-derived values, then force overwrite like
+                    # manual "Replace all metadata".
+                    def _identified_refresh(iid=item_id):
+                        self.wait_for_jellyfin_identification(iid)
+                        self.refresh_jellyfin_item(iid, replace_all=True)
+
+                    self.scan_monitor_executor.submit(_identified_refresh)
                 return True
 
             # If plugin returned success without ItemId, scan was accepted on server
@@ -2146,8 +2152,62 @@ class PlexScanner:
             logger.error(f"Error getting Jellyfin/Emby item ID for {file_path}: {e}")
             return None
 
-    def refresh_jellyfin_item(self, item_id):
-        """Trigger metadata refresh on Jellyfin/Emby for a specific item ID."""
+    def get_jellyfin_item_provider_ids(self, item_id):
+        """Fetch the ProviderIds dict for a Jellyfin/Emby item.
+
+        Returns the ProviderIds mapping (e.g. {"Tmdb": "1302904"}) or an
+        empty dict when the item has no remote-provider identification yet.
+        Used to avoid firing a metadata refresh before Jellyfin has
+        identified the item — refreshing an unidentified item only
+        re-persists filename-derived values.
+        """
+        server_url = (self.config.get("SERVER_URL") or "").rstrip("/")
+        if not server_url or not item_id:
+            return {}
+        headers = self._get_jellyfin_headers()
+        params = {"Fields": "ProviderIds", **self._get_jellyfin_params()}
+        try:
+            res = self.http_session.get(
+                f"{server_url}/Items/{item_id}",
+                headers=headers,
+                params=params,
+                timeout=10,
+            )
+            res.raise_for_status()
+            data = res.json()
+            provider_ids = data.get("ProviderIds") or {}
+            return provider_ids if isinstance(provider_ids, dict) else {}
+        except Exception as e:
+            logger.debug(f"Could not fetch ProviderIds for item {item_id}: {e}")
+            return {}
+
+    def wait_for_jellyfin_identification(self, item_id, max_attempts=5):
+        """Poll until Jellyfin has provider IDs for the item.
+
+        Jellyfin identifies a newly created item asynchronously. Refreshing
+        before identification completes leaves filename-derived metadata
+        (title, overview) in place, since there is no remote entry to merge.
+        Returns True when ProviderIds are present, False on timeout.
+        """
+        for attempt in range(max_attempts):
+            provider_ids = self.get_jellyfin_item_provider_ids(item_id)
+            if provider_ids:
+                return True
+            time.sleep(3 if attempt == 0 else 5)
+        logger.warning(
+            f"Item {item_id} has no ProviderIds after identification wait; "
+            "refreshing anyway."
+        )
+        return False
+
+    def refresh_jellyfin_item(self, item_id, replace_all=False):
+        """Trigger metadata refresh on Jellyfin/Emby for a specific item ID.
+
+        replace_all mirrors Jellyfin's manual "Replace all metadata" action
+        (ReplaceAllMetadata=true), forcing remote providers to overwrite
+        existing values such as the filename-derived title. Defaults to False
+        to preserve the lighter existing behaviour for other callers.
+        """
         if not item_id:
             return
         server_url = (self.config.get("SERVER_URL") or "").rstrip("/")
@@ -2157,7 +2217,7 @@ class PlexScanner:
             "MetadataRefreshMode": "FullRefresh",
             "ImageRefreshMode": "FullRefresh",
             "ReplaceAllImages": "false",
-            "ReplaceAllMetadata": "false",
+            "ReplaceAllMetadata": "true" if replace_all else "false",
             **self._get_jellyfin_params(),
         }
         try:
@@ -2210,7 +2270,11 @@ class PlexScanner:
                 # Clear stuck status immediately as it's now confirmed in the library!
                 self.history.clear_entry(file_path)
                 if self.config.get("PLEX_REFRESH"):
-                    self.refresh_jellyfin_item(item_id)
+                    # Wait for provider identification so the refresh merges
+                    # remote metadata instead of re-persisting filename values,
+                    # then force overwrite like manual "Replace all metadata".
+                    self.wait_for_jellyfin_identification(item_id)
+                    self.refresh_jellyfin_item(item_id, replace_all=True)
             else:
                 logger.debug(
                     f"Could not find Jellyfin/Emby item ID for newly scanned file: {file_path}"

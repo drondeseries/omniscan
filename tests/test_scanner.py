@@ -283,9 +283,16 @@ class TestPlexScanner(unittest.TestCase):
             self.assertEqual(args[0], "http://jellyfin.local:8096/Library/ScanPath")
             self.assertEqual(kwargs["json"], {"Path": "/media/movie.mkv"})
             self.assertIn("Authorization", kwargs["headers"])
-            mock_submit.assert_called_once_with(
-                self.scanner.refresh_jellyfin_item, "item-abc-123"
-            )
+            # Post-import refresh runs after identification wait with
+            # replace_all=True (issue #8 follow-up: filename title sticks
+            # without forced overwrite like manual "Replace all metadata").
+            mock_submit.assert_called_once()
+            submitted_fn = mock_submit.call_args[0][0]
+            with patch.object(self.scanner, "wait_for_jellyfin_identification", return_value=True) as mock_wait, \
+                 patch.object(self.scanner, "refresh_jellyfin_item") as mock_refresh:
+                submitted_fn()
+                mock_wait.assert_called_once_with("item-abc-123")
+                mock_refresh.assert_called_once_with("item-abc-123", replace_all=True)
 
     def test_try_plugin_scan_skips_refresh_when_disabled(self):
         self.scanner.config["SERVER_URL"] = "http://jellyfin.local:8096"

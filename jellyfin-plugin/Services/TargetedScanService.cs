@@ -345,9 +345,20 @@ public class TargetedScanService
                 "OmniscanPlugin: created {Type} '{Name}' at {Path}",
                 resolvedItem.GetType().Name, resolvedItem.Name, path);
 
-            // Run a non-blocking metadata refresh so artwork & info appear quickly.
+            /// Run a non-blocking metadata refresh so artwork & info appear quickly.
             // For newly created items, use FullRefresh so remote metadata and image providers are queried.
-            _ = RefreshItemAsync(resolvedItem, fullRefresh: true, CancellationToken.None);
+            // ReplaceAllMetadata=true mirrors the manual "Replace all metadata" action:
+            // without it, FullRefresh preserves existing values such as the
+            // filename-derived title (issue #8 follow-up).
+            _ = Task.Run(async () =>
+            {
+                // Brief delay so provider identification (which runs async
+                // after creation) has a chance to attach ProviderIds before
+                // the refresh merges remote metadata.
+                try { await Task.Delay(TimeSpan.FromSeconds(10), CancellationToken.None).ConfigureAwait(false); }
+                catch (TaskCanceledException) { }
+                await RefreshItemAsync(resolvedItem, fullRefresh: true, replaceAll: true, CancellationToken.None).ConfigureAwait(false);
+            });
 
             return resolvedItem;
         }
@@ -366,8 +377,10 @@ public class TargetedScanService
     /// Trigger a metadata refresh on an item.
     /// When fullRefresh is true (e.g. newly created items), FullRefresh is used so remote metadata and image providers are queried.
     /// When fullRefresh is false (e.g. existing items), ValidationOnly is used for lightweight fast validation.
+    /// When replaceAll is true, remote providers overwrite existing values (mirrors
+    /// Jellyfin's manual "Replace all metadata" action) instead of preserving them.
     /// </summary>
-    private async Task RefreshItemAsync(BaseItem item, bool fullRefresh, CancellationToken cancellationToken)
+    private async Task RefreshItemAsync(BaseItem item, bool fullRefresh, CancellationToken cancellationToken, bool replaceAll = false)
     {
         try
         {
@@ -377,7 +390,7 @@ public class TargetedScanService
                 {
                     MetadataRefreshMode = mode,
                     ImageRefreshMode    = mode,
-                    ReplaceAllMetadata  = false,
+                    ReplaceAllMetadata  = replaceAll,
                     ReplaceAllImages    = false,
                 },
                 cancellationToken).ConfigureAwait(false);

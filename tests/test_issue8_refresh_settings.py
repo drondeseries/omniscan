@@ -228,10 +228,12 @@ class TestIssue8Regression(unittest.TestCase):
 
         with patch.object(self.scanner, "get_jellyfin_item_id", side_effect=mock_get_id), \
              patch.object(self.scanner, "refresh_jellyfin_item") as mock_refresh, \
+             patch.object(self.scanner, "wait_for_jellyfin_identification", return_value=True) as mock_wait, \
              patch("time.sleep"):
             self.scanner._post_scan_process_file(file_path, max_attempts=3)
             self.assertEqual(call_count, 2)
-            mock_refresh.assert_called_once_with("settled-item-id")
+            mock_wait.assert_called_once_with("settled-item-id")
+            mock_refresh.assert_called_once_with("settled-item-id", replace_all=True)
 
     def test_post_scan_skips_refresh_when_disabled(self):
         self.scanner.config["PLEX_REFRESH"] = False
@@ -239,9 +241,48 @@ class TestIssue8Regression(unittest.TestCase):
 
         with patch.object(self.scanner, "get_jellyfin_item_id", return_value="item-123"), \
              patch.object(self.scanner, "refresh_jellyfin_item") as mock_refresh, \
+             patch.object(self.scanner, "wait_for_jellyfin_identification") as mock_wait, \
              patch("time.sleep"):
             self.scanner._post_scan_process_file(file_path, max_attempts=1)
             mock_refresh.assert_not_called()
+            mock_wait.assert_not_called()
+
+    def test_refresh_uses_replace_all_metadata(self):
+        """Post-import refresh must force overwrite (issue #8 follow-up).
+
+        FullRefresh alone preserves existing values such as the
+        filename-derived title; only ReplaceAllMetadata=true behaves like
+        Jellyfin's manual "Replace all metadata" action.
+        """
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        with patch.object(self.scanner.http_session, "post", return_value=mock_resp) as mock_post:
+            self.scanner.refresh_jellyfin_item("item-abc", replace_all=True)
+            _, kwargs = mock_post.call_args
+            self.assertEqual(kwargs["params"]["ReplaceAllMetadata"], "true")
+            # Default stays lightweight for other callers
+            self.scanner.refresh_jellyfin_item("item-abc")
+            _, kwargs = mock_post.call_args
+            self.assertEqual(kwargs["params"]["ReplaceAllMetadata"], "false")
+
+    def test_wait_for_identification_returns_when_provider_ids_present(self):
+        with patch.object(
+            self.scanner, "get_jellyfin_item_provider_ids", return_value={"Tmdb": "1302904"}
+        ), patch("time.sleep") as mock_sleep:
+            self.assertTrue(self.scanner.wait_for_jellyfin_identification("item-abc"))
+            mock_sleep.assert_not_called()
+
+    def test_wait_for_identification_times_out_without_provider_ids(self):
+        with patch.object(
+            self.scanner, "get_jellyfin_item_provider_ids", return_value={}
+        ), patch("time.sleep"):
+            self.assertFalse(self.scanner.wait_for_jellyfin_identification("item-abc", max_attempts=2))
+
+    def test_get_provider_ids_returns_empty_on_error(self):
+        with patch.object(
+            self.scanner.http_session, "get", side_effect=Exception("down")
+        ):
+            self.assertEqual(self.scanner.get_jellyfin_item_provider_ids("item-abc"), {})
 
     def test_try_plugin_scan_status_only_enqueues_verification(self):
         mock_resp = MagicMock()
