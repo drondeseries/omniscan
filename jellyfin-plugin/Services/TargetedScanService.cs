@@ -354,19 +354,24 @@ public class TargetedScanService
             // ReplaceAllMetadata=true mirrors the manual "Replace all metadata" action:
             // without it, FullRefresh preserves existing values such as the
             // filename-derived title (issue #8 follow-up).
-            // Bounded to max 3 concurrent refreshes via _refreshLimiter, and
-            // the request cancellationToken is passed through so shutdown
-            // cancels the pending refresh (OperationCanceledException skips).
+            // Bounded to max 3 concurrent refreshes via _refreshLimiter.
+            // Deliberately uses CancellationToken.None: this is fire-and-forget
+            // background work that must survive the originating HTTP request
+            // completing (the 10s delay alone outlives most requests). Capture
+            // only value copies (item reference + path string), nothing
+            // request-scoped, so a disposed request scope cannot cancel it.
+            var refreshItem = resolvedItem;
+            var refreshPath = path;
             _ = Task.Run(async () =>
             {
                 bool acquired = false;
                 try
                 {
                     // Best-effort bound: skip the refresh if 3 are already running.
-                    acquired = await _refreshLimiter.WaitAsync(0, cancellationToken).ConfigureAwait(false);
+                    acquired = await _refreshLimiter.WaitAsync(0).ConfigureAwait(false);
                     if (!acquired)
                     {
-                        _logger.LogDebug("OmniscanPlugin: refresh skipped (limiter full) for: {Path}", path);
+                        _logger.LogDebug("OmniscanPlugin: refresh skipped (limiter full) for: {Path}", refreshPath);
                         return;
                     }
                     try
@@ -374,17 +379,17 @@ public class TargetedScanService
                         // Brief delay so provider identification (which runs async
                         // after creation) has a chance to attach ProviderIds before
                         // the refresh merges remote metadata.
-                        await Task.Delay(TimeSpan.FromSeconds(10), cancellationToken).ConfigureAwait(false);
-                        await RefreshItemAsync(resolvedItem, fullRefresh: true, cancellationToken: cancellationToken, replaceAll: true).ConfigureAwait(false);
+                        await Task.Delay(TimeSpan.FromSeconds(10)).ConfigureAwait(false);
+                        await RefreshItemAsync(refreshItem, fullRefresh: true, cancellationToken: CancellationToken.None, replaceAll: true).ConfigureAwait(false);
                     }
                     finally
                     {
                         _refreshLimiter.Release();
                     }
                 }
-                catch (OperationCanceledException)
+                catch (Exception ex)
                 {
-                    _logger.LogDebug("OmniscanPlugin: refresh cancelled for: {Path}", path);
+                    _logger.LogWarning(ex, "OmniscanPlugin: background refresh failed for: {Path}", refreshPath);
                 }
             });
 
