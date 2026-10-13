@@ -275,7 +275,11 @@ class TestPlexScanner(unittest.TestCase):
             self.scanner.http_session, "post", return_value=mock_response
         ) as mock_post, patch.object(
             self.scanner.scan_monitor_executor, "submit"
-        ) as mock_submit:
+        ) as mock_submit, patch.object(
+            self.scanner, "refresh_jellyfin_item"
+        ) as mock_refresh, patch.object(
+            self.scanner, "wait_for_jellyfin_identification"
+        ) as mock_wait:
             res = self.scanner._try_plugin_scan("/media/movie.mkv", None)
             self.assertTrue(res)
             mock_post.assert_called_once()
@@ -283,16 +287,30 @@ class TestPlexScanner(unittest.TestCase):
             self.assertEqual(args[0], "http://jellyfin.local:8096/Library/ScanPath")
             self.assertEqual(kwargs["json"], {"Path": "/media/movie.mkv"})
             self.assertIn("Authorization", kwargs["headers"])
-            # Post-import refresh runs after identification wait with
-            # replace_all=True (issue #8 follow-up: filename title sticks
-            # without forced overwrite like manual "Replace all metadata").
-            mock_submit.assert_called_once()
-            submitted_fn = mock_submit.call_args[0][0]
-            with patch.object(self.scanner, "wait_for_jellyfin_identification", return_value=True) as mock_wait, \
-                 patch.object(self.scanner, "refresh_jellyfin_item") as mock_refresh:
-                submitted_fn()
-                mock_wait.assert_called_once_with("item-abc-123")
-                mock_refresh.assert_called_once_with("item-abc-123", replace_all=True)
+            # Single refresh owner: the plugin owns the refresh for items it
+            # creates, so Python must NOT submit a refresh or call refresh
+            # directly when ItemId is returned — even with PLEX_REFRESH on.
+            mock_submit.assert_not_called()
+            mock_wait.assert_not_called()
+            mock_refresh.assert_not_called()
+
+    def test_try_plugin_scan_item_id_call_arg_correctness(self):
+        """Plugin ScanPath call must hit /Library/ScanPath with {"Path": ...} + auth."""
+        self.scanner.config["SERVER_URL"] = "http://jellyfin.local:8096/"
+        self.scanner.config["API_KEY"] = "token123"
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"ItemId": "item-xyz", "Status": "Created"}
+        with patch.object(
+            self.scanner.http_session, "post", return_value=mock_response
+        ) as mock_post:
+            self.assertTrue(self.scanner._try_plugin_scan("/media/movie.mkv", None))
+            args, kwargs = mock_post.call_args
+            # Trailing slash in SERVER_URL must be stripped (no double slash)
+            self.assertEqual(args[0], "http://jellyfin.local:8096/Library/ScanPath")
+            self.assertEqual(kwargs["json"], {"Path": "/media/movie.mkv"})
+            self.assertIn("Authorization", kwargs["headers"])
+            self.assertEqual(kwargs["timeout"], 30)
 
     def test_try_plugin_scan_skips_refresh_when_disabled(self):
         self.scanner.config["SERVER_URL"] = "http://jellyfin.local:8096"

@@ -235,6 +235,19 @@ class TestIssue8Regression(unittest.TestCase):
             mock_wait.assert_called_once_with("settled-item-id")
             mock_refresh.assert_called_once_with("settled-item-id", replace_all=True)
 
+    def test_post_scan_skips_refresh_when_identification_times_out(self):
+        """Fallback path: wait False must suppress the replace-all refresh."""
+        self.scanner.config["PLEX_REFRESH"] = True
+        file_path = "/media/movies/movie.mkv"
+
+        with patch.object(self.scanner, "get_jellyfin_item_id", return_value="item-123"), \
+             patch.object(self.scanner, "refresh_jellyfin_item") as mock_refresh, \
+             patch.object(self.scanner, "wait_for_jellyfin_identification", return_value=False) as mock_wait, \
+             patch("time.sleep"):
+            self.scanner._post_scan_process_file(file_path, max_attempts=1)
+            mock_wait.assert_called_once_with("item-123")
+            mock_refresh.assert_not_called()
+
     def test_post_scan_skips_refresh_when_disabled(self):
         self.scanner.config["PLEX_REFRESH"] = False
         file_path = "/media/movies/movie.mkv"
@@ -278,11 +291,51 @@ class TestIssue8Regression(unittest.TestCase):
         ), patch("time.sleep"):
             self.assertFalse(self.scanner.wait_for_jellyfin_identification("item-abc", max_attempts=2))
 
+    def test_wait_for_identification_no_trailing_sleep_and_deadline_capped(self):
+        """No sleep after the final attempt; total wait capped by deadline."""
+        import omniscan_pkg.scanner as scanner_mod
+
+        with patch.object(
+            self.scanner, "get_jellyfin_item_provider_ids", return_value={}
+        ), patch.object(scanner_mod.time, "sleep") as mock_sleep, patch.object(
+            scanner_mod.time, "monotonic", side_effect=[0, 1, 2, 100, 101]
+        ):
+            self.assertFalse(
+                self.scanner.wait_for_jellyfin_identification(
+                    "item-abc", max_attempts=5, max_wait_seconds=15
+                )
+            )
+            # Deadline (monotonic=100 > 15) stops the loop early: fewer sleeps
+            # than max_attempts-1 and no trailing sleep after the last attempt.
+            self.assertLessEqual(mock_sleep.call_count, 2)
+
     def test_get_provider_ids_returns_empty_on_error(self):
         with patch.object(
             self.scanner.http_session, "get", side_effect=Exception("down")
         ):
             self.assertEqual(self.scanner.get_jellyfin_item_provider_ids("item-abc"), {})
+
+    def test_try_plugin_scan_item_id_submits_no_python_refresh(self):
+        """Single refresh owner: plugin ItemId => no Python refresh submitted."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "ItemId": "item-abc-123",
+            "Status": "Created",
+            "Message": "Created successfully",
+        }
+
+        self.scanner.config["PLEX_REFRESH"] = True
+        with patch.object(self.scanner.http_session, "post", return_value=mock_resp), \
+              patch.object(self.scanner.scan_monitor_executor, "submit") as mock_submit, \
+              patch.object(self.scanner, "refresh_jellyfin_item") as mock_refresh, \
+              patch.object(self.scanner, "wait_for_jellyfin_identification") as mock_wait:
+            ret = self.scanner._try_plugin_scan("/media/movies/new.mkv", None)
+            self.assertTrue(ret)
+            # Plugin owns the refresh — Python must not enqueue or call one.
+            mock_submit.assert_not_called()
+            mock_wait.assert_not_called()
+            mock_refresh.assert_not_called()
 
     def test_try_plugin_scan_status_only_enqueues_verification(self):
         mock_resp = MagicMock()

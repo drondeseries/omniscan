@@ -35,6 +35,10 @@ public class TargetedScanService
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> _parentLocks =
         new(StringComparer.OrdinalIgnoreCase);
 
+    // Bounded concurrent refreshes for newly created items (best-effort:
+    // semaphore limits overlap without blocking the creation path).
+    private static readonly SemaphoreSlim _refreshLimiter = new(3, 3);
+
     private readonly ILibraryManager _libraryManager;
     private readonly IProviderManager _providerManager;
     private readonly IFileSystem _fileSystem;
@@ -345,19 +349,43 @@ public class TargetedScanService
                 "OmniscanPlugin: created {Type} '{Name}' at {Path}",
                 resolvedItem.GetType().Name, resolvedItem.Name, path);
 
-            /// Run a non-blocking metadata refresh so artwork & info appear quickly.
+            /// Run a bounded non-blocking metadata refresh so artwork & info appear quickly.
             // For newly created items, use FullRefresh so remote metadata and image providers are queried.
             // ReplaceAllMetadata=true mirrors the manual "Replace all metadata" action:
             // without it, FullRefresh preserves existing values such as the
             // filename-derived title (issue #8 follow-up).
+            // Bounded to max 3 concurrent refreshes via _refreshLimiter, and
+            // the request cancellationToken is passed through so shutdown
+            // cancels the pending refresh (OperationCanceledException skips).
             _ = Task.Run(async () =>
             {
-                // Brief delay so provider identification (which runs async
-                // after creation) has a chance to attach ProviderIds before
-                // the refresh merges remote metadata.
-                try { await Task.Delay(TimeSpan.FromSeconds(10), CancellationToken.None).ConfigureAwait(false); }
-                catch (TaskCanceledException) { }
-                await RefreshItemAsync(resolvedItem, fullRefresh: true, replaceAll: true, CancellationToken.None).ConfigureAwait(false);
+                bool acquired = false;
+                try
+                {
+                    // Best-effort bound: skip the refresh if 3 are already running.
+                    acquired = await _refreshLimiter.WaitAsync(0, cancellationToken).ConfigureAwait(false);
+                    if (!acquired)
+                    {
+                        _logger.LogDebug("OmniscanPlugin: refresh skipped (limiter full) for: {Path}", path);
+                        return;
+                    }
+                    try
+                    {
+                        // Brief delay so provider identification (which runs async
+                        // after creation) has a chance to attach ProviderIds before
+                        // the refresh merges remote metadata.
+                        await Task.Delay(TimeSpan.FromSeconds(10), cancellationToken).ConfigureAwait(false);
+                        await RefreshItemAsync(resolvedItem, fullRefresh: true, cancellationToken: cancellationToken, replaceAll: true).ConfigureAwait(false);
+                    }
+                    finally
+                    {
+                        _refreshLimiter.Release();
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    _logger.LogDebug("OmniscanPlugin: refresh cancelled for: {Path}", path);
+                }
             });
 
             return resolvedItem;

@@ -1723,17 +1723,13 @@ class PlexScanner:
                 logger.info(
                     f"🔎 Targeted plugin scan successful for: {BOLD}{path}{RESET} (ItemId: {item_id})"
                 )
-                if self.config.get("PLEX_REFRESH"):
-                    # Kick off metadata refresh when user setting is enabled.
-                    # Wait for provider identification first so the refresh
-                    # merges remote metadata instead of re-persisting
-                    # filename-derived values, then force overwrite like
-                    # manual "Replace all metadata".
-                    def _identified_refresh(iid=item_id):
-                        self.wait_for_jellyfin_identification(iid)
-                        self.refresh_jellyfin_item(iid, replace_all=True)
-
-                    self.scan_monitor_executor.submit(_identified_refresh)
+                # Single refresh owner: the plugin owns the refresh for items
+                # it creates (it fires a bounded FullRefresh+ReplaceAll after
+                # identification). Python must NOT also submit a replace-all
+                # refresh for the same ItemId — that would double-refresh and
+                # risk re-persisting filename-derived values. Python's refresh
+                # lives only on the non-plugin fallback path
+                # (_post_scan_process_file).
                 return True
 
             # If plugin returned success without ItemId, scan was accepted on server
@@ -2181,22 +2177,36 @@ class PlexScanner:
             logger.debug(f"Could not fetch ProviderIds for item {item_id}: {e}")
             return {}
 
-    def wait_for_jellyfin_identification(self, item_id, max_attempts=5):
+    def wait_for_jellyfin_identification(self, item_id, max_attempts=5, max_wait_seconds=15):
         """Poll until Jellyfin has provider IDs for the item.
 
         Jellyfin identifies a newly created item asynchronously. Refreshing
         before identification completes leaves filename-derived metadata
         (title, overview) in place, since there is no remote entry to merge.
-        Returns True when ProviderIds are present, False on timeout.
+        Runs on the shared scan_monitor_executor via its callers, so the wait
+        is bounded: no trailing sleep after the final attempt and an overall
+        deadline (default 15s) caps total blocking time on the pool.
+        Returns True when ProviderIds are present, False on timeout — callers
+        must NOT refresh when False (skip and log instead of refreshing
+        anyway).
         """
+        deadline = time.monotonic() + max_wait_seconds
         for attempt in range(max_attempts):
             provider_ids = self.get_jellyfin_item_provider_ids(item_id)
             if provider_ids:
                 return True
-            time.sleep(3 if attempt == 0 else 5)
+            if attempt >= max_attempts - 1:
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            delay = 3 if attempt == 0 else 5
+            delay = min(delay, remaining)
+            if delay > 0:
+                time.sleep(delay)
         logger.warning(
             f"Item {item_id} has no ProviderIds after identification wait; "
-            "refreshing anyway."
+            "skipping refresh."
         )
         return False
 
@@ -2273,8 +2283,11 @@ class PlexScanner:
                     # Wait for provider identification so the refresh merges
                     # remote metadata instead of re-persisting filename values,
                     # then force overwrite like manual "Replace all metadata".
-                    self.wait_for_jellyfin_identification(item_id)
-                    self.refresh_jellyfin_item(item_id, replace_all=True)
+                    # Skip the refresh entirely when identification times out
+                    # (wait returns False) — refreshing an unidentified item
+                    # only re-persists filename-derived values.
+                    if self.wait_for_jellyfin_identification(item_id):
+                        self.refresh_jellyfin_item(item_id, replace_all=True)
             else:
                 logger.debug(
                     f"Could not find Jellyfin/Emby item ID for newly scanned file: {file_path}"
