@@ -128,6 +128,13 @@ class PlexScanner:
         # Executor for monitoring Plex scans without blocking the queue
         self.scan_monitor_executor = ThreadPoolExecutor(max_workers=4)
 
+        # Dedicated single-thread helper for deadline-sensitive I/O (e.g.
+        # ProviderIds lookups): isolates trickling-response blocking from the
+        # shared scan_monitor pool so one slow server cannot starve it.
+        self._io_helper_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="omniscan-io"
+        )
+
         # Start the background worker for debounced scans
         self.worker_thread = threading.Thread(
             target=self._process_scan_queue, daemon=True
@@ -2157,12 +2164,37 @@ class PlexScanner:
         identified the item — refreshing an unidentified item only
         re-persists filename-derived values. timeout caps the single HTTP
         operation; callers pass the remaining deadline budget.
+
+        Runs the blocking Requests call in a dedicated single-thread helper
+        executor and waits at most `timeout` for the future: Requests'
+        scalar timeout only bounds connect/read inactivity, so a trickling
+        server could otherwise hold a shared scan_monitor worker past the
+        deadline. (The orphaned socket/connection is reclaimed by the pool
+        on completion; pool_maxsize=100 keeps this bounded.)
         """
         server_url = (self.config.get("SERVER_URL") or "").rstrip("/")
         if not server_url or not item_id:
             return {}
         headers = self._get_jellyfin_headers()
         params = {"Fields": "ProviderIds", **self._get_jellyfin_params()}
+        future = self._io_helper_executor.submit(
+            self._fetch_provider_ids_blocking,
+            server_url,
+            item_id,
+            headers,
+            params,
+            timeout,
+        )
+        try:
+            result = future.result(timeout=timeout)
+            return result if isinstance(result, dict) else {}
+        except Exception as e:
+            logger.debug(f"ProviderIds lookup timed out/failed for item {item_id}: {e}")
+            future.cancel()
+            return {}
+
+    def _fetch_provider_ids_blocking(self, server_url, item_id, headers, params, timeout):
+        """Synchronous ProviderIds GET; runs on the I/O helper executor."""
         try:
             res = self.http_session.get(
                 f"{server_url}/Items/{item_id}",
@@ -2412,7 +2444,11 @@ class PlexScanner:
             except Exception:
                 pass
         self.stop_jellyfin_alert_listener()
-        for executor in (self.event_executor, self.scan_monitor_executor):
+        for executor in (
+            self.event_executor,
+            self.scan_monitor_executor,
+            self._io_helper_executor,
+        ):
             executor.shutdown(wait=False, cancel_futures=True)
         self.http_session.close()
 

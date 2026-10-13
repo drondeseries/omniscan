@@ -370,6 +370,34 @@ class TestIssue8Regression(unittest.TestCase):
         ):
             self.assertEqual(self.scanner.get_jellyfin_item_provider_ids("item-abc"), {})
 
+    def test_get_provider_ids_returns_empty_when_helper_exceeds_timeout(self):
+        """A trickling server must not hold the caller past the budget."""
+        import concurrent.futures
+
+        real_submit = self.scanner._io_helper_executor.submit
+
+        def slow_submit(fn, *args, **kwargs):
+            fut = concurrent.futures.Future()
+
+            def _never_finish():
+                import time as _time
+
+                _time.sleep(30)
+
+            import threading
+
+            threading.Thread(target=_never_finish, daemon=True).start()
+            return fut
+
+        with patch.object(
+            self.scanner, "_io_helper_executor"
+        ) as mock_exec:
+            mock_exec.submit.side_effect = slow_submit
+            self.assertEqual(
+                self.scanner.get_jellyfin_item_provider_ids("item-abc", timeout=0.05),
+                {},
+            )
+
     def test_try_plugin_scan_item_id_submits_no_python_refresh(self):
         """Single refresh owner: plugin ItemId => no Python refresh submitted."""
         mock_resp = MagicMock()
