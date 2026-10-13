@@ -263,6 +263,7 @@ class TestPlexScanner(unittest.TestCase):
     def test_try_plugin_scan_success(self):
         self.scanner.config["SERVER_URL"] = "http://jellyfin.local:8096"
         self.scanner.config["API_KEY"] = "token123"
+        self.scanner.config["PLEX_REFRESH"] = True
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
@@ -285,6 +286,26 @@ class TestPlexScanner(unittest.TestCase):
             mock_submit.assert_called_once_with(
                 self.scanner.refresh_jellyfin_item, "item-abc-123"
             )
+
+    def test_try_plugin_scan_skips_refresh_when_disabled(self):
+        self.scanner.config["SERVER_URL"] = "http://jellyfin.local:8096"
+        self.scanner.config["API_KEY"] = "token123"
+        self.scanner.config["PLEX_REFRESH"] = False
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "ItemId": "item-abc-123",
+            "Status": "Created",
+            "Message": "Created successfully",
+        }
+        with patch.object(
+            self.scanner.http_session, "post", return_value=mock_response
+        ), patch.object(
+            self.scanner.scan_monitor_executor, "submit"
+        ) as mock_submit:
+            res = self.scanner._try_plugin_scan("/media/movie.mkv", None)
+            self.assertTrue(res)
+            mock_submit.assert_not_called()
 
     @patch("omniscan_pkg.scanner.websocket")
     def test_jellyfin_websocket_empty_api_key_aborts(self, mock_ws):

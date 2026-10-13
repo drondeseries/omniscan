@@ -213,20 +213,7 @@ def main():
     if config.get("RUN_ON_STARTUP") and not (args.watch or config.get("WATCH_MODE")):
         scanner.run_scan()
 
-    if config["START_TIME"] and interval_unit == "hours":
-        try:
-            start_hour, start_minute = map(int, config["START_TIME"].split(":"))
-            for i in range(0, 24, config["RUN_INTERVAL"]):
-                hour = (start_hour + i) % 24
-                time_str = f"{hour:02d}:{start_minute:02d}"
-                schedule.every().day.at(time_str).do(scanner.run_scan)
-        except ValueError:
-            schedule.every(config["RUN_INTERVAL"]).hours.do(scanner.run_scan)
-    else:
-        if interval_unit == "minutes":
-            schedule.every(config["RUN_INTERVAL"]).minutes.do(scanner.run_scan)
-        else:
-            schedule.every(config["RUN_INTERVAL"]).hours.do(scanner.run_scan)
+    scanner.reschedule()
 
     while not stop_event.is_set():
         schedule.run_pending()

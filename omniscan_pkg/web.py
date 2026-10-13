@@ -35,6 +35,8 @@ from .config import (
     normalize_emby_url,
     get_jellyfin_headers,
     get_jellyfin_params,
+    persist_settings,
+    apply_and_save_settings,
 )
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from .webhook_parser import parse_webhook
@@ -213,6 +215,7 @@ class SettingsUpdate(BaseModel):
     scan_delay: float = Field(ge=0, le=3600)
     watch_mode: bool
     run_interval: int = Field(ge=1, le=8760)
+    run_interval_unit: Optional[str] = None
     run_on_startup: bool
     start_time: Optional[str] = None
     incremental_scan: bool
@@ -229,6 +232,10 @@ class SettingsUpdate(BaseModel):
     path_rewrites: str
     integrity_check: bool
     ffprobe_check: bool
+    cleanup_days: Optional[int] = Field(default=None, ge=1, le=365)
+    max_retries: Optional[int] = Field(default=None, ge=1, le=100)
+    plex_analyze: Optional[bool] = None
+    plex_refresh: Optional[bool] = None
 
 
 class SetupSubmit(BaseModel):
@@ -566,6 +573,11 @@ async def get_stats(u: str = Depends(get_current_user)):
             ),
             "integrity_check": cfg.get("INTEGRITY_CHECK"),
             "ffprobe_check": cfg.get("FFPROBE_CHECK"),
+            "run_interval_unit": cfg.get("RUN_INTERVAL_UNIT", "hours"),
+            "max_retries": cfg.get("MAX_RETRIES", 3),
+            "cleanup_days": cfg.get("CLEANUP_DAYS", 10),
+            "plex_analyze": cfg.get("PLEX_ANALYZE", False),
+            "plex_refresh": cfg.get("PLEX_REFRESH", False),
         },
     }
 
@@ -736,117 +748,68 @@ async def update_settings(s: SettingsUpdate, u: str = Depends(get_current_user))
     if not scanner_instance:
         return JSONResponse({"error": "init"}, status_code=500)
     c = scanner_instance.config
-    c["SERVER_TYPE"] = s.server_type
-    c["SERVER_URL"] = normalize_emby_url(
-        unmask_v(s.server_url, c.get("SERVER_URL", "")), c["SERVER_TYPE"]
-    )
-    c["API_KEY"] = unmask_v(s.api_key, c.get("API_KEY", ""))
-    c["PLEX_URL"] = s.plex_server
-    c["TOKEN"] = unmask_v(s.plex_token, c.get("TOKEN", ""))
-    c["SCAN_PATHS"] = [
-        p.strip()
-        for p in s.scan_directories.replace(",", "\n").split("\n")
-        if p.strip()
-    ]
-    c["SCAN_WORKERS"] = s.scan_workers
-    c["SCAN_DEBOUNCE"] = s.scan_debounce
-    c["SCAN_DELAY"] = s.scan_delay
-    c["WATCH_MODE"] = s.watch_mode
-    c["RUN_INTERVAL"] = s.run_interval
-    c["RUN_ON_STARTUP"] = s.run_on_startup
-    c["START_TIME"] = s.start_time
-    c["INCREMENTAL_SCAN"] = s.incremental_scan
-    c["SCAN_SINCE_DAYS"] = s.scan_since_days
-    c["SYMLINK_CHECK"] = s.symlink_check
-    c["EMPTY_TRASH"] = s.empty_trash
-    c["INTEGRITY_CHECK"] = s.integrity_check
-    c["FFPROBE_CHECK"] = s.ffprobe_check
-    c["DELETION_THRESHOLD"] = s.deletion_threshold
-    c["ABORT_ON_MASS_DELETION"] = s.abort_on_mass_deletion
-    c["NOTIFICATIONS_ENABLED"] = s.notifications_enabled
-    c["DISCORD_WEBHOOK_URL"] = unmask_v(
-        s.discord_webhook_url, c.get("DISCORD_WEBHOOK_URL", "")
-    )
-    c["NOTIFICATION_GROUP_WINDOW"] = s.notification_group_window
-    c["IGNORE_PATTERNS"] = [
-        p.strip() for p in s.ignore_patterns.replace(",", "\n").split("\n") if p.strip()
-    ]
-    c["LOG_LEVEL"] = s.log_level
 
-    c["PATH_REWRITES"] = []
+    path_rewrites_list = []
     for line in s.path_rewrites.replace(",", "\n").split("\n"):
         line = line.strip()
         if not line:
             continue
         if ":" in line:
             parts = line.split(":", 1)
-            c["PATH_REWRITES"].append((parts[0].strip(), parts[1].strip()))
+            path_rewrites_list.append((parts[0].strip(), parts[1].strip()))
+
+    settings_values = {
+        "SERVER_TYPE": s.server_type,
+        "SERVER_URL": unmask_v(s.server_url, c.get("SERVER_URL", "")),
+        "API_KEY": unmask_v(s.api_key, c.get("API_KEY", "")),
+        "PLEX_URL": s.plex_server,
+        "TOKEN": unmask_v(s.plex_token, c.get("TOKEN", "")),
+        "SCAN_PATHS": [
+            p.strip()
+            for p in s.scan_directories.replace(",", "\n").split("\n")
+            if p.strip()
+        ],
+        "SCAN_WORKERS": s.scan_workers,
+        "SCAN_DEBOUNCE": s.scan_debounce,
+        "SCAN_DELAY": s.scan_delay,
+        "WATCH_MODE": s.watch_mode,
+        "RUN_INTERVAL": s.run_interval,
+        "RUN_INTERVAL_UNIT": s.run_interval_unit,
+        "RUN_ON_STARTUP": s.run_on_startup,
+        "START_TIME": s.start_time,
+        "INCREMENTAL_SCAN": s.incremental_scan,
+        "SCAN_SINCE_DAYS": s.scan_since_days,
+        "SYMLINK_CHECK": s.symlink_check,
+        "EMPTY_TRASH": s.empty_trash,
+        "INTEGRITY_CHECK": s.integrity_check,
+        "FFPROBE_CHECK": s.ffprobe_check,
+        "DELETION_THRESHOLD": s.deletion_threshold,
+        "ABORT_ON_MASS_DELETION": s.abort_on_mass_deletion,
+        "NOTIFICATIONS_ENABLED": s.notifications_enabled,
+        "DISCORD_WEBHOOK_URL": unmask_v(
+            s.discord_webhook_url, c.get("DISCORD_WEBHOOK_URL", "")
+        ),
+        "NOTIFICATION_GROUP_WINDOW": s.notification_group_window,
+        "IGNORE_PATTERNS": [
+            p.strip() for p in s.ignore_patterns.replace(",", "\n").split("\n") if p.strip()
+        ],
+        "LOG_LEVEL": s.log_level,
+        "CLEANUP_DAYS": s.cleanup_days,
+        "MAX_RETRIES": s.max_retries,
+        "PLEX_ANALYZE": s.plex_analyze,
+        "PLEX_REFRESH": s.plex_refresh,
+        "PATH_REWRITES": path_rewrites_list,
+    }
 
     try:
-        cfg = configparser.ConfigParser(interpolation=None)
-        cfg.read("config.ini")
-        for sec in [
-            "server",
-            "plex",
-            "behaviour",
-            "notifications",
-            "scan",
-            "ignore",
-            "logs",
-            "rewrite",
-        ]:
-            if not cfg.has_section(sec):
-                cfg.add_section(sec)
-        cfg.set("server", "type", str(c["SERVER_TYPE"]))
-        cfg.set("server", "url", str(c["SERVER_URL"]))
-        cfg.set("server", "api_key", str(c["API_KEY"]))
-        cfg.set("plex", "server", str(c["PLEX_URL"]))
-        cfg.set("plex", "token", str(c["TOKEN"]))
-        cfg.set("behaviour", "scan_workers", str(c["SCAN_WORKERS"]))
-        cfg.set("behaviour", "scan_debounce", str(c["SCAN_DEBOUNCE"]))
-        cfg.set("behaviour", "scan_delay", str(c["SCAN_DELAY"]))
-        cfg.set("behaviour", "watch", str(c["WATCH_MODE"]).lower())
-        cfg.set("behaviour", "run_interval", str(c["RUN_INTERVAL"]))
-        cfg.set("behaviour", "run_on_startup", str(c["RUN_ON_STARTUP"]).lower())
-        cfg.set("behaviour", "start_time", c["START_TIME"] if c["START_TIME"] else "")
-        cfg.set("behaviour", "incremental_scan", str(c["INCREMENTAL_SCAN"]).lower())
-        cfg.set("behaviour", "scan_since_days", str(c["SCAN_SINCE_DAYS"]))
-        cfg.set("behaviour", "symlink_check", str(c["SYMLINK_CHECK"]).lower())
-        cfg.set("behaviour", "empty_trash", str(c["EMPTY_TRASH"]).lower())
-        cfg.set("behaviour", "integrity_check", str(c["INTEGRITY_CHECK"]).lower())
-        cfg.set("behaviour", "ffprobe_check", str(c["FFPROBE_CHECK"]).lower())
-        cfg.set("behaviour", "deletion_threshold", str(c["DELETION_THRESHOLD"]))
-        cfg.set(
-            "behaviour",
-            "abort_on_mass_deletion",
-            str(c["ABORT_ON_MASS_DELETION"]).lower(),
+        candidate, applied_ok, warning_msg = apply_and_save_settings(
+            scanner_instance, settings_values, config_path="config.ini"
         )
-        cfg.set("notifications", "enabled", str(c["NOTIFICATIONS_ENABLED"]).lower())
-        cfg.set("notifications", "discord_webhook_url", str(c["DISCORD_WEBHOOK_URL"]))
-        cfg.set(
-            "behaviour",
-            "notification_group_window",
-            str(c["NOTIFICATION_GROUP_WINDOW"]),
-        )
-        cfg.set("ignore", "patterns", ",".join(c["IGNORE_PATTERNS"]))
-        cfg.set("logs", "loglevel", str(c["LOG_LEVEL"]))
-        cfg.set(
-            "rewrite",
-            "mappings",
-            ",".join([f"{src}:{dst}" for src, dst in c["PATH_REWRITES"]]),
-        )
-
-        with open("config.ini", "w") as f:
-            cfg.write(f)
-
-        st = (c.get("SERVER_TYPE") or "").lower()
-        if st == "plex":
-            scanner_instance.connect_to_plex(retry=False)
-            scanner_instance.get_library_ids()
-        elif st in ["jellyfin", "emby"]:
-            if hasattr(scanner_instance, "restart_jellyfin_alert_listener"):
-                scanner_instance.restart_jellyfin_alert_listener()
-
+        if not applied_ok:
+            return {
+                "status": "partial_success",
+                "warning": f"Settings saved to disk, but runtime update had issues: {warning_msg}",
+            }
         return {"status": "success"}
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)

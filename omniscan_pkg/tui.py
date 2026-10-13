@@ -49,6 +49,12 @@ SETTINGS_KEYS = [
     ("notifications_enabled", "Enable Notifications (true/false)"),
     ("ignore_patterns", "Ignore Patterns"),
     ("path_rewrites", "Path Mappings (Rewrites)"),
+    ("plex_analyze", "Trigger Media Analysis (true/false)"),
+    ("plex_refresh", "Trigger Metadata Refresh (true/false)"),
+    ("run_interval_unit", "Interval Unit (hours/minutes)"),
+    ("start_time", "Start Time (HH:MM)"),
+    ("max_retries", "Max Stuck Retries"),
+    ("cleanup_days", "History Cleanup Days"),
 ]
 
 
@@ -649,22 +655,35 @@ def draw_tui(stdscr):
                     res = session.post(
                         f"{api_url}/api/settings", json=local_config, timeout=5
                     )
+                    data = res.json() if res.content else {}
                     if res.status_code == 200:
-                        stdscr.addstr(
-                            h - 1,
-                            2,
-                            "Settings Saved Successfully! Rebuilding Cache...",
-                            curses.color_pair(2) | curses.A_BOLD,
-                        )
-                        stdscr.refresh()
-                        time.sleep(1.5)
-                        current_tab = "dashboard"
+                        if data.get("status") == "partial_success":
+                            warn_msg = data.get("warning", "Settings saved with runtime warnings")
+                            stdscr.addstr(
+                                h - 1,
+                                2,
+                                f"Saved with warning: {warn_msg}"[:w - 4],
+                                curses.color_pair(3) | curses.A_BOLD,
+                            )
+                            stdscr.refresh()
+                            time.sleep(2.5)
+                            current_tab = "dashboard"
+                        else:
+                            stdscr.addstr(
+                                h - 1,
+                                2,
+                                "Settings Saved Successfully! Rebuilding Cache...",
+                                curses.color_pair(2) | curses.A_BOLD,
+                            )
+                            stdscr.refresh()
+                            time.sleep(1.5)
+                            current_tab = "dashboard"
                     else:
-                        err = res.json().get("error", "Unknown API error")
+                        err = data.get("error", "Unknown API error")
                         stdscr.addstr(
                             h - 1,
                             2,
-                            f"Failed to Save: {err}",
+                            f"Failed to Save: {err}"[:w - 4],
                             curses.color_pair(4) | curses.A_BOLD,
                         )
                         stdscr.refresh()
@@ -673,7 +692,7 @@ def draw_tui(stdscr):
                     stdscr.addstr(
                         h - 1,
                         2,
-                        f"Communication Error: {e}",
+                        f"Communication Error: {e}"[:w - 4],
                         curses.color_pair(4) | curses.A_BOLD,
                     )
                     stdscr.refresh()

@@ -147,7 +147,7 @@ public class TargetedScanService
         {
             _logger.LogDebug("OmniscanPlugin: already in library: {Path}", path);
             // Still refresh metadata so any changes (e.g. updated NFO) are picked up.
-            await RefreshItemAsync(existing, cancellationToken).ConfigureAwait(false);
+            await RefreshItemAsync(existing, fullRefresh: false, cancellationToken).ConfigureAwait(false);
             return ScanPathResult.Existing(existing);
         }
 
@@ -170,18 +170,48 @@ public class TargetedScanService
 
         BaseItem? lastCreated = null;
         var currentParent = knownAncestor;
-        foreach (var missingPath in missingPaths)
+        for (int i = 0; i < missingPaths.Count; i++)
         {
+            var missingPath = missingPaths[i];
             cancellationToken.ThrowIfCancellationRequested();
-            lastCreated = await CreateItemAsync(
+            var created = await CreateItemAsync(
                 missingPath,
                 currentParent,
                 cancellationToken)
-                .ConfigureAwait(false)
-                ?? lastCreated;
+                .ConfigureAwait(false);
+
+            if (created is null)
+            {
+                _logger.LogWarning("OmniscanPlugin: failed to create item at '{Path}'. Aborting descent.", missingPath);
+                return ScanPathResult.Error(missingPath, $"Item could not be created for path: {missingPath}");
+            }
+
+            lastCreated = created;
             if (lastCreated is Folder folder)
             {
                 currentParent = folder;
+            }
+            else
+            {
+                // Reached a leaf item (Movie, Episode, Video, etc.).
+                // If there are unprocessed child paths remaining, this non-Folder item is only valid
+                // if it directly represents the requested target video (e.g. a Movie container resolved for
+                // the immediate parent movie directory where the target path is that Movie's primary media file or part).
+                bool isTargetOrContainer =
+                    string.Equals(missingPath, path, StringComparison.OrdinalIgnoreCase) ||
+                    (lastCreated is MediaBrowser.Controller.Entities.Movies.Movie movie &&
+                     string.Equals(Path.GetDirectoryName(path), missingPath, StringComparison.OrdinalIgnoreCase) &&
+                     (string.Equals(movie.Path, path, StringComparison.OrdinalIgnoreCase) ||
+                      (movie.AdditionalParts is not null && movie.AdditionalParts.Any(p => string.Equals(p, path, StringComparison.OrdinalIgnoreCase)))));
+
+                if (!isTargetOrContainer && i < missingPaths.Count - 1)
+                {
+                    _logger.LogWarning(
+                        "OmniscanPlugin: created non-Folder item '{Type}' at '{ItemPath}', but target '{Target}' has remaining child paths. Aborting.",
+                        lastCreated.GetType().Name, missingPath, path);
+                    return ScanPathResult.Error(missingPath, "Resolved intermediate item is not a folder container.");
+                }
+                break;
             }
         }
 
@@ -316,7 +346,8 @@ public class TargetedScanService
                 resolvedItem.GetType().Name, resolvedItem.Name, path);
 
             // Run a non-blocking metadata refresh so artwork & info appear quickly.
-            _ = RefreshItemAsync(resolvedItem, CancellationToken.None);
+            // For newly created items, use FullRefresh so remote metadata and image providers are queried.
+            _ = RefreshItemAsync(resolvedItem, fullRefresh: true, CancellationToken.None);
 
             return resolvedItem;
         }
@@ -332,24 +363,28 @@ public class TargetedScanService
     }
 
     /// <summary>
-    /// Trigger a light metadata refresh on an existing item.
-    /// Uses ValidationOnly so it's fast and doesn't re-fetch remote metadata.
+    /// Trigger a metadata refresh on an item.
+    /// When fullRefresh is true (e.g. newly created items), FullRefresh is used so remote metadata and image providers are queried.
+    /// When fullRefresh is false (e.g. existing items), ValidationOnly is used for lightweight fast validation.
     /// </summary>
-    private async Task RefreshItemAsync(BaseItem item, CancellationToken cancellationToken)
+    private async Task RefreshItemAsync(BaseItem item, bool fullRefresh, CancellationToken cancellationToken)
     {
         try
         {
+            var mode = fullRefresh ? MetadataRefreshMode.FullRefresh : MetadataRefreshMode.ValidationOnly;
             await item.RefreshMetadata(
                 new MetadataRefreshOptions(new DirectoryService(_fileSystem))
                 {
-                    MetadataRefreshMode = MetadataRefreshMode.ValidationOnly,
-                    ImageRefreshMode    = MetadataRefreshMode.ValidationOnly,
+                    MetadataRefreshMode = mode,
+                    ImageRefreshMode    = mode,
+                    ReplaceAllMetadata  = false,
+                    ReplaceAllImages    = false,
                 },
                 cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
-            _logger.LogDebug(ex, "OmniscanPlugin: metadata refresh failed for: {Path}", item.Path);
+            _logger.LogWarning(ex, "OmniscanPlugin: metadata refresh failed for: {Path}", item.Path);
         }
     }
 }

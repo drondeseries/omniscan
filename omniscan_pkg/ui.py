@@ -14,6 +14,8 @@ from .config import (
     normalize_emby_url,
     get_jellyfin_headers,
     get_jellyfin_params,
+    persist_settings,
+    apply_and_save_settings,
 )
 from datetime import datetime
 from collections import defaultdict
@@ -2396,270 +2398,99 @@ def init_ui(app, scanner):
                         server_url.value, scanner.config.get("SERVER_URL", "")
                     )
 
-                    c = scanner.config
-                    c["SERVER_TYPE"] = server_type.value
-                    c["SERVER_URL"] = normalize_emby_url(
-                        unmasked_server_url, c["SERVER_TYPE"]
-                    )
-                    c["API_KEY"] = unmasked_api_key
-                    c["PLEX_URL"] = plex_url.value
-                    c["TOKEN"] = unmasked_token
-                    c["SCAN_PATHS"] = [
-                        p.strip()
-                        for p in scan_directories.value.replace(",", "\n").split("\n")
-                        if p.strip()
-                    ]
-                    c["WATCH_DIRECTORIES"] = []
-                    c["SCAN_WORKERS"] = int(scan_workers.value)
-                    c["SCAN_DEBOUNCE"] = int(scan_debounce.value)
-                    c["SCAN_DELAY"] = float(scan_delay.value)
-                    c["WATCH_MODE"] = watch_mode.value
-                    c["RUN_INTERVAL"] = int(run_interval.value)
-                    c["RUN_INTERVAL_UNIT"] = str(run_interval_unit.value)
-                    c["MAX_RETRIES"] = int(max_retries.value)
-                    c["RUN_ON_STARTUP"] = run_on_startup.value
-                    c["START_TIME"] = start_time.value
-                    c["INCREMENTAL_SCAN"] = incremental_scan.value
-                    c["SCAN_SINCE_DAYS"] = int(scan_since_days.value)
-                    c["SYMLINK_CHECK"] = symlink_check.value
-                    c["EMPTY_TRASH"] = empty_trash.value
-                    c["INTEGRITY_CHECK"] = integrity_check.value
-                    c["FFPROBE_CHECK"] = ffprobe_check.value
-                    c["DELETION_THRESHOLD"] = int(deletion_threshold.value)
-                    c["ABORT_ON_MASS_DELETION"] = abort_on_mass_deletion.value
-                    c["NOTIFICATIONS_ENABLED"] = notifications_enabled.value
-                    c["DISCORD_WEBHOOK_URL"] = unmasked_webhook
-                    c["NOTIFICATION_GROUP_WINDOW"] = int(
-                        notification_group_window.value
-                    )
-                    c["IGNORE_PATTERNS"] = [
-                        p.strip()
-                        for p in ignore_patterns.value.replace(",", "\n").split("\n")
-                        if p.strip()
-                    ]
-                    c["LOG_LEVEL"] = log_level.value
-
-                    c["CLEANUP_DAYS"] = int(cleanup_days.value)
-                    c["PLEX_ANALYZE"] = plex_analyze.value
-                    c["PLEX_REFRESH"] = plex_refresh.value
-                    c["DISCORD_MENTION_USERS"] = [
-                        u.strip() for u in mention_users.value.split(",") if u.strip()
-                    ]
-                    c["DISCORD_MENTION_ROLES"] = [
-                        r.strip() for r in mention_roles.value.split(",") if r.strip()
-                    ]
-                    c["DISCORD_MENTION_EVERYONE"] = mention_everyone.value
-                    c["DISCORD_MENTION_HERE"] = mention_here.value
-                    c["DISCORD_MENTION_EVENTS"] = [
-                        e.strip().lower()
-                        for e in mention_events.value.split(",")
-                        if e.strip()
-                    ]
-
-                    # Web Security
                     new_pw = web_password.value.strip()
                     if new_pw:
                         if new_pw != web_password_confirm.value.strip():
                             ui.notify("Passwords do not match!", type="negative")
                             return
-                        c["WEB_PASSWORD"] = new_pw
-                    c["WEB_USERNAME"] = web_username.value.strip() or "admin"
-                    c["WEB_AUTH_DISABLED"] = auth_disabled.value
 
-                    c["PATH_REWRITES"] = []
+                    path_rewrites_list = []
                     for line in path_rewrites.value.replace(",", "\n").split("\n"):
                         line = line.strip()
                         if not line:
                             continue
                         if ":" in line:
                             parts = line.split(":", 1)
-                            c["PATH_REWRITES"].append(
+                            path_rewrites_list.append(
                                 (parts[0].strip(), parts[1].strip())
                             )
 
+                    settings_values = {
+                        "SERVER_TYPE": server_type.value,
+                        "SERVER_URL": unmasked_server_url,
+                        "API_KEY": unmasked_api_key,
+                        "PLEX_URL": plex_url.value,
+                        "TOKEN": unmasked_token,
+                        "SCAN_PATHS": [
+                            p.strip()
+                            for p in scan_directories.value.replace(",", "\n").split("\n")
+                            if p.strip()
+                        ],
+                        "WATCH_DIRECTORIES": [],
+                        "SCAN_WORKERS": scan_workers.value,
+                        "SCAN_DEBOUNCE": scan_debounce.value,
+                        "SCAN_DELAY": scan_delay.value,
+                        "WATCH_MODE": watch_mode.value,
+                        "RUN_INTERVAL": run_interval.value,
+                        "RUN_INTERVAL_UNIT": run_interval_unit.value,
+                        "MAX_RETRIES": max_retries.value,
+                        "RUN_ON_STARTUP": run_on_startup.value,
+                        "START_TIME": start_time.value,
+                        "INCREMENTAL_SCAN": incremental_scan.value,
+                        "SCAN_SINCE_DAYS": scan_since_days.value,
+                        "SYMLINK_CHECK": symlink_check.value,
+                        "EMPTY_TRASH": empty_trash.value,
+                        "INTEGRITY_CHECK": integrity_check.value,
+                        "FFPROBE_CHECK": ffprobe_check.value,
+                        "DELETION_THRESHOLD": deletion_threshold.value,
+                        "ABORT_ON_MASS_DELETION": abort_on_mass_deletion.value,
+                        "NOTIFICATIONS_ENABLED": notifications_enabled.value,
+                        "DISCORD_WEBHOOK_URL": unmasked_webhook,
+                        "NOTIFICATION_GROUP_WINDOW": notification_group_window.value,
+                        "IGNORE_PATTERNS": [
+                            p.strip()
+                            for p in ignore_patterns.value.replace(",", "\n").split("\n")
+                            if p.strip()
+                        ],
+                        "LOG_LEVEL": log_level.value,
+                        "CLEANUP_DAYS": cleanup_days.value,
+                        "PLEX_ANALYZE": plex_analyze.value,
+                        "PLEX_REFRESH": plex_refresh.value,
+                        "DISCORD_MENTION_USERS": [
+                            u.strip() for u in mention_users.value.split(",") if u.strip()
+                        ],
+                        "DISCORD_MENTION_ROLES": [
+                            r.strip() for r in mention_roles.value.split(",") if r.strip()
+                        ],
+                        "DISCORD_MENTION_EVERYONE": mention_everyone.value,
+                        "DISCORD_MENTION_HERE": mention_here.value,
+                        "DISCORD_MENTION_EVENTS": [
+                            e.strip().lower()
+                            for e in mention_events.value.split(",")
+                            if e.strip()
+                        ],
+                        "WEB_USERNAME": web_username.value.strip() or "admin",
+                        "WEB_AUTH_DISABLED": auth_disabled.value,
+                        "PATH_REWRITES": path_rewrites_list,
+                    }
+                    if new_pw:
+                        settings_values["WEB_PASSWORD"] = new_pw
+
                     try:
-                        cfg = configparser.ConfigParser()
-                        cfg.read("config.ini")
-                        for sec in [
-                            "server",
-                            "plex",
-                            "behaviour",
-                            "notifications",
-                            "scan",
-                            "ignore",
-                            "logs",
-                            "rewrite",
-                        ]:
-                            if not cfg.has_section(sec):
-                                cfg.add_section(sec)
-                        cfg.set("server", "type", str(c["SERVER_TYPE"]))
-                        cfg.set("server", "url", str(c["SERVER_URL"]))
-                        cfg.set("server", "api_key", str(c["API_KEY"]))
-                        cfg.set("plex", "server", str(c["PLEX_URL"]))
-                        cfg.set("plex", "token", str(c["TOKEN"]))
-                        cfg.set("behaviour", "scan_workers", str(c["SCAN_WORKERS"]))
-                        cfg.set("behaviour", "scan_debounce", str(c["SCAN_DEBOUNCE"]))
-                        cfg.set("behaviour", "scan_delay", str(c["SCAN_DELAY"]))
-                        cfg.set("behaviour", "watch", str(c["WATCH_MODE"]).lower())
-                        cfg.set("behaviour", "run_interval", str(c["RUN_INTERVAL"]))
-                        cfg.set("behaviour", "run_interval_unit", str(c["RUN_INTERVAL_UNIT"]))
-                        cfg.set("behaviour", "max_retries", str(c["MAX_RETRIES"]))
-                        cfg.set(
-                            "behaviour",
-                            "run_on_startup",
-                            str(c["RUN_ON_STARTUP"]).lower(),
+                        candidate, applied_ok, warning_msg = apply_and_save_settings(
+                            scanner, settings_values, config_path="config.ini"
                         )
-                        cfg.set(
-                            "behaviour",
-                            "start_time",
-                            c["START_TIME"] if c["START_TIME"] else "",
-                        )
-                        cfg.set(
-                            "behaviour",
-                            "incremental_scan",
-                            str(c["INCREMENTAL_SCAN"]).lower(),
-                        )
-                        cfg.set(
-                            "behaviour", "scan_since_days", str(c["SCAN_SINCE_DAYS"])
-                        )
-                        cfg.set(
-                            "behaviour",
-                            "symlink_check",
-                            str(c["SYMLINK_CHECK"]).lower(),
-                        )
-                        cfg.set(
-                            "behaviour", "empty_trash", str(c["EMPTY_TRASH"]).lower()
-                        )
-                        cfg.set(
-                            "behaviour",
-                            "integrity_check",
-                            str(c["INTEGRITY_CHECK"]).lower(),
-                        )
-                        cfg.set(
-                            "behaviour",
-                            "ffprobe_check",
-                            str(c["FFPROBE_CHECK"]).lower(),
-                        )
-                        cfg.set(
-                            "behaviour",
-                            "deletion_threshold",
-                            str(c["DELETION_THRESHOLD"]),
-                        )
-                        cfg.set(
-                            "behaviour",
-                            "abort_on_mass_deletion",
-                            str(c["ABORT_ON_MASS_DELETION"]).lower(),
-                        )
-                        cfg.set(
-                            "notifications",
-                            "enabled",
-                            str(c["NOTIFICATIONS_ENABLED"]).lower(),
-                        )
-                        cfg.set(
-                            "notifications",
-                            "discord_webhook_url",
-                            str(c["DISCORD_WEBHOOK_URL"]),
-                        )
-                        cfg.set(
-                            "behaviour",
-                            "notification_group_window",
-                            str(c["NOTIFICATION_GROUP_WINDOW"]),
-                        )
-
-                        cfg.set("behaviour", "cleanup_days", str(c["CLEANUP_DAYS"]))
-                        cfg.set(
-                            "behaviour", "plex_analyze", str(c["PLEX_ANALYZE"]).lower()
-                        )
-                        cfg.set(
-                            "behaviour", "plex_refresh", str(c["PLEX_REFRESH"]).lower()
-                        )
-                        cfg.set(
-                            "notifications",
-                            "mention_users",
-                            ",".join(c["DISCORD_MENTION_USERS"]),
-                        )
-                        cfg.set(
-                            "notifications",
-                            "mention_roles",
-                            ",".join(c["DISCORD_MENTION_ROLES"]),
-                        )
-                        cfg.set(
-                            "notifications",
-                            "mention_everyone",
-                            str(c["DISCORD_MENTION_EVERYONE"]).lower(),
-                        )
-                        cfg.set(
-                            "notifications",
-                            "mention_here",
-                            str(c["DISCORD_MENTION_HERE"]).lower(),
-                        )
-                        cfg.set(
-                            "notifications",
-                            "mention_events",
-                            ",".join(c["DISCORD_MENTION_EVENTS"]),
-                        )
-                        cfg.set("scan", "directories", ",".join(c["SCAN_PATHS"]))
-                        cfg.set("scan", "watch_directories", "")
-                        cfg.set("ignore", "patterns", ",".join(c["IGNORE_PATTERNS"]))
-                        cfg.set("logs", "loglevel", str(c["LOG_LEVEL"]))
-                        cfg.set(
-                            "rewrite",
-                            "mappings",
-                            ",".join(
-                                [f"{src}:{dst}" for src, dst in c["PATH_REWRITES"]]
-                            ),
-                        )
-                        if not cfg.has_section("web"):
-                            cfg.add_section("web")
-                        cfg.set("web", "username", str(c["WEB_USERNAME"]))
-                        cfg.set("web", "password", str(c["WEB_PASSWORD"]))
-                        cfg.set(
-                            "web", "auth_disabled", str(c["WEB_AUTH_DISABLED"]).lower()
-                        )
-
-                        with open("config.ini", "w") as f:
-                            cfg.write(f)
-
-                        # Dynamically update the scheduler and stuck file tracker limit
-                        try:
-                            import schedule
-                            schedule.clear()
-                            
-                            interval_unit = c.get("RUN_INTERVAL_UNIT", "hours").lower()
-                            interval = c.get("RUN_INTERVAL", 24)
-                            start_time = c.get("START_TIME", "")
-                            
-                            if start_time and interval_unit == "hours":
-                                try:
-                                    start_hour, start_minute = map(int, start_time.split(":"))
-                                    for i in range(0, 24, interval):
-                                        hour = (start_hour + i) % 24
-                                        time_str = f"{hour:02d}:{start_minute:02d}"
-                                        schedule.every().day.at(time_str).do(scanner.run_scan)
-                                except ValueError:
-                                    schedule.every(interval).hours.do(scanner.run_scan)
-                            else:
-                                if interval_unit == "minutes":
-                                    schedule.every(interval).minutes.do(scanner.run_scan)
-                                else:
-                                    schedule.every(interval).hours.do(scanner.run_scan)
-                            
-                            logger.info(f"Rescheduled runs: every {interval} {interval_unit}")
-                        except Exception as sched_err:
-                            logger.error(f"Error updating scheduler on settings save: {sched_err}")
-
-                        try:
-                            scanner.history.max_retries = c.get("MAX_RETRIES", 3)
-                        except Exception as tracker_err:
-                            logger.error(f"Error updating tracker max_retries: {tracker_err}")
-
-                        if c["SERVER_TYPE"] == "plex":
-                            scanner.connect_to_plex(retry=False)
-                            scanner.get_library_ids()
-
-                        ui.notify("Settings saved successfully!", type="positive")
-                    except Exception as ex:
-                        ui.notify(f"Failed to save: {ex}", type="negative")
+                        if not applied_ok:
+                            logger.warning(f"Runtime update issue on save: {warning_msg}")
+                            ui.notify(
+                                f"Settings saved to disk, but runtime had issue: {warning_msg}",
+                                type="warning",
+                            )
+                        else:
+                            ui.notify("Settings saved successfully!", type="positive")
+                    except Exception as save_err:
+                        logger.error(f"Failed to persist configuration to config.ini: {save_err}")
+                        ui.notify(f"Failed to save settings: {save_err}", type="negative")
 
                 ui.button("💾  Save Settings", on_click=handle_save_settings).classes(
                     "px-10 py-3 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 "

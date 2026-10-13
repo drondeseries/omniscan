@@ -484,3 +484,240 @@ def save_config(config, config_path="config.ini"):
         except OSError:
             pass
         raise
+
+
+def _int_str(val, default):
+    try:
+        return str(int(float(val)))
+    except (ValueError, TypeError):
+        return str(default)
+
+
+def _float_str(val, default):
+    try:
+        return str(float(val))
+    except (ValueError, TypeError):
+        return str(default)
+
+
+def _bool_str(val, default=False):
+    if isinstance(val, str):
+        return str(val.lower() in ("true", "1", "yes")).lower()
+    return str(bool(val)).lower()
+
+
+def format_config_sections(c):
+    """Convert flat runtime configuration dictionary to section-based dictionary for config.ini."""
+    sections = {
+        "server": {
+            "type": str(c.get("SERVER_TYPE", "plex")).lower(),
+            "url": str(c.get("SERVER_URL", "")),
+            "api_key": str(c.get("API_KEY", "")),
+        },
+        "plex": {
+            "server": str(c.get("PLEX_URL", "")),
+            "token": str(c.get("TOKEN", "")),
+        },
+        "behaviour": {
+            "scan_workers": _int_str(c.get("SCAN_WORKERS"), 4),
+            "scan_debounce": _int_str(c.get("SCAN_DEBOUNCE"), 10),
+            "scan_delay": _float_str(c.get("SCAN_DELAY"), 0.0),
+            "watch": _bool_str(c.get("WATCH_MODE"), False),
+            "run_interval": _int_str(c.get("RUN_INTERVAL"), 24),
+            "run_interval_unit": str(c.get("RUN_INTERVAL_UNIT", "hours")).lower(),
+            "max_retries": _int_str(c.get("MAX_RETRIES"), 3),
+            "run_on_startup": _bool_str(c.get("RUN_ON_STARTUP"), True),
+            "start_time": str(c.get("START_TIME", "") or ""),
+            "incremental_scan": _bool_str(c.get("INCREMENTAL_SCAN"), False),
+            "scan_since_days": _int_str(c.get("SCAN_SINCE_DAYS"), 7),
+            "symlink_check": _bool_str(c.get("SYMLINK_CHECK"), False),
+            "empty_trash": _bool_str(c.get("EMPTY_TRASH"), False),
+            "integrity_check": _bool_str(c.get("INTEGRITY_CHECK"), False),
+            "ffprobe_check": _bool_str(c.get("FFPROBE_CHECK"), False),
+            "deletion_threshold": _int_str(c.get("DELETION_THRESHOLD"), 50),
+            "abort_on_mass_deletion": _bool_str(c.get("ABORT_ON_MASS_DELETION"), True),
+            "notification_group_window": _int_str(c.get("NOTIFICATION_GROUP_WINDOW"), 15),
+            "cleanup_days": _int_str(c.get("CLEANUP_DAYS"), 10),
+            "plex_analyze": _bool_str(c.get("PLEX_ANALYZE"), False),
+            "plex_refresh": _bool_str(c.get("PLEX_REFRESH"), False),
+        },
+        "notifications": {
+            "enabled": str(c.get("NOTIFICATIONS_ENABLED", True)).lower(),
+            "discord_webhook_url": str(c.get("DISCORD_WEBHOOK_URL", "")),
+            "mention_users": ",".join(c.get("DISCORD_MENTION_USERS", []))
+            if isinstance(c.get("DISCORD_MENTION_USERS"), (list, tuple))
+            else str(c.get("DISCORD_MENTION_USERS", "")),
+            "mention_roles": ",".join(c.get("DISCORD_MENTION_ROLES", []))
+            if isinstance(c.get("DISCORD_MENTION_ROLES"), (list, tuple))
+            else str(c.get("DISCORD_MENTION_ROLES", "")),
+            "mention_everyone": str(c.get("DISCORD_MENTION_EVERYONE", False)).lower(),
+            "mention_here": str(c.get("DISCORD_MENTION_HERE", False)).lower(),
+            "mention_events": ",".join(c.get("DISCORD_MENTION_EVENTS", []))
+            if isinstance(c.get("DISCORD_MENTION_EVENTS"), (list, tuple))
+            else str(c.get("DISCORD_MENTION_EVENTS", "")),
+        },
+        "scan": {
+            "directories": ",".join(c.get("SCAN_PATHS", []))
+            if isinstance(c.get("SCAN_PATHS"), (list, tuple))
+            else str(c.get("SCAN_PATHS", "")),
+            "watch_directories": ",".join(c.get("WATCH_DIRECTORIES", []))
+            if isinstance(c.get("WATCH_DIRECTORIES"), (list, tuple))
+            else str(c.get("WATCH_DIRECTORIES", "")),
+        },
+        "ignore": {
+            "patterns": ",".join(c.get("IGNORE_PATTERNS", []))
+            if isinstance(c.get("IGNORE_PATTERNS"), (list, tuple))
+            else str(c.get("IGNORE_PATTERNS", "")),
+        },
+        "logs": {
+            "loglevel": str(c.get("LOG_LEVEL", "INFO")),
+        },
+        "rewrite": {
+            "mappings": ",".join(
+                [f"{src}:{dst}" for src, dst in c.get("PATH_REWRITES", [])]
+            )
+            if isinstance(c.get("PATH_REWRITES"), list)
+            else str(c.get("PATH_REWRITES", "")),
+        },
+    }
+    web_sec = {}
+    if "WEB_USERNAME" in c:
+        web_sec["username"] = str(c.get("WEB_USERNAME", "admin"))
+    if "WEB_PASSWORD" in c and c["WEB_PASSWORD"]:
+        web_sec["password"] = str(c.get("WEB_PASSWORD", ""))
+    if "WEB_AUTH_DISABLED" in c:
+        web_sec["auth_disabled"] = str(c.get("WEB_AUTH_DISABLED", False)).lower()
+    if "WEBHOOK_TOKEN" in c and c["WEBHOOK_TOKEN"]:
+        web_sec["webhook_token"] = str(c.get("WEBHOOK_TOKEN", ""))
+    if web_sec:
+        sections["web"] = web_sec
+
+    return sections
+
+
+def persist_settings(c, config_path="config.ini"):
+    """Atomically validates and saves flat runtime configuration to config.ini."""
+    sections = format_config_sections(c)
+    save_config(sections, config_path=config_path)
+
+
+def apply_and_save_settings(scanner, settings_dict, config_path="config.ini"):
+    """Atomically validates, persists, and publishes candidate settings to runtime and scheduler."""
+    candidate = dict(scanner.config if scanner and hasattr(scanner, "config") else {})
+
+    for key, val in settings_dict.items():
+        if val is not None:
+            candidate[key] = val
+
+    # Normalization & validation
+    if "SERVER_TYPE" in candidate:
+        candidate["SERVER_TYPE"] = str(candidate["SERVER_TYPE"]).lower()
+    if "SERVER_URL" in candidate:
+        candidate["SERVER_URL"] = normalize_emby_url(
+            candidate["SERVER_URL"], candidate.get("SERVER_TYPE")
+        )
+    if "SCAN_SINCE_DAYS" in candidate:
+        try:
+            candidate["SCAN_SINCE_DAYS"] = max(0, int(float(candidate["SCAN_SINCE_DAYS"])))
+        except (ValueError, TypeError):
+            candidate["SCAN_SINCE_DAYS"] = 7
+    if "NOTIFICATION_GROUP_WINDOW" in candidate:
+        try:
+            candidate["NOTIFICATION_GROUP_WINDOW"] = max(1, int(float(candidate["NOTIFICATION_GROUP_WINDOW"])))
+        except (ValueError, TypeError):
+            candidate["NOTIFICATION_GROUP_WINDOW"] = 15
+    if "RUN_INTERVAL" in candidate:
+        try:
+            candidate["RUN_INTERVAL"] = max(1, int(float(candidate["RUN_INTERVAL"])))
+        except (ValueError, TypeError):
+            candidate["RUN_INTERVAL"] = 24
+    if "RUN_INTERVAL_UNIT" in candidate:
+        unit = str(candidate["RUN_INTERVAL_UNIT"]).lower()
+        candidate["RUN_INTERVAL_UNIT"] = unit if unit in ("hours", "minutes") else "hours"
+    if "START_TIME" in candidate:
+        candidate["START_TIME"] = str(candidate["START_TIME"] or "").strip()
+    if "MAX_RETRIES" in candidate:
+        try:
+            candidate["MAX_RETRIES"] = max(1, int(float(candidate["MAX_RETRIES"])))
+        except (ValueError, TypeError):
+            candidate["MAX_RETRIES"] = 3
+    if "SCAN_WORKERS" in candidate:
+        try:
+            candidate["SCAN_WORKERS"] = max(1, min(64, int(float(candidate["SCAN_WORKERS"]))))
+        except (ValueError, TypeError):
+            candidate["SCAN_WORKERS"] = 4
+    if "SCAN_DEBOUNCE" in candidate:
+        try:
+            candidate["SCAN_DEBOUNCE"] = max(0, int(float(candidate["SCAN_DEBOUNCE"])))
+        except (ValueError, TypeError):
+            candidate["SCAN_DEBOUNCE"] = 10
+    if "SCAN_DELAY" in candidate:
+        try:
+            candidate["SCAN_DELAY"] = max(0.0, float(candidate["SCAN_DELAY"]))
+        except (ValueError, TypeError):
+            candidate["SCAN_DELAY"] = 0.0
+    if "CLEANUP_DAYS" in candidate:
+        try:
+            candidate["CLEANUP_DAYS"] = max(1, int(float(candidate["CLEANUP_DAYS"])))
+        except (ValueError, TypeError):
+            candidate["CLEANUP_DAYS"] = 10
+    if "DELETION_THRESHOLD" in candidate:
+        try:
+            candidate["DELETION_THRESHOLD"] = max(1, int(float(candidate["DELETION_THRESHOLD"])))
+        except (ValueError, TypeError):
+            candidate["DELETION_THRESHOLD"] = 50
+
+    # 1. Atomic disk persistence FIRST
+    persist_settings(candidate, config_path=config_path)
+
+    # 2. Disk persistence succeeded: publish to runtime scanner
+    runtime_warnings = []
+    if scanner and hasattr(scanner, "config"):
+        scanner.config.update(candidate)
+
+        # 3. Update stuck file tracker
+        if hasattr(scanner, "history"):
+            try:
+                scanner.history.max_retries = candidate.get("MAX_RETRIES", 3)
+            except Exception as e:
+                runtime_warnings.append(f"Tracker update warning: {e}")
+
+        # 4. Reschedule safely (contain any scheduler exception)
+        if hasattr(scanner, "reschedule"):
+            try:
+                res = scanner.reschedule(
+                    interval=candidate.get("RUN_INTERVAL", 24),
+                    interval_unit=candidate.get("RUN_INTERVAL_UNIT", "hours"),
+                    start_time=candidate.get("START_TIME", ""),
+                )
+                if isinstance(res, tuple) and len(res) == 2 and not res[0]:
+                    runtime_warnings.append(f"Scheduler update issue: {res[1]}")
+            except Exception as sched_ex:
+                logging.getLogger(__name__).error(f"Error during rescheduling: {sched_ex}")
+                runtime_warnings.append(f"Scheduler update error: {sched_ex}")
+
+        # 5. Server reconnect / listener restart (contained)
+        st = (candidate.get("SERVER_TYPE") or "").lower()
+        if st == "plex":
+            try:
+                server = scanner.connect_to_plex(retry=False)
+                if not server or not getattr(scanner, "plex", None):
+                    runtime_warnings.append("Could not connect to Plex server")
+                else:
+                    libs = scanner.get_library_ids()
+                    if not libs or not getattr(scanner, "plex", None):
+                        runtime_warnings.append("Connected to Plex but failed to discover libraries")
+            except Exception as e:
+                logging.getLogger(__name__).warning(f"Error reconnecting to Plex on settings save: {e}")
+                runtime_warnings.append(f"Plex reconnect warning: {e}")
+        elif st in ["jellyfin", "emby"]:
+            try:
+                if hasattr(scanner, "restart_jellyfin_alert_listener"):
+                    scanner.restart_jellyfin_alert_listener()
+            except Exception as e:
+                logging.getLogger(__name__).warning(f"Error restarting Jellyfin listener: {e}")
+                runtime_warnings.append(f"Jellyfin listener restart warning: {e}")
+
+    applied_ok = len(runtime_warnings) == 0
+    warning_msg = "; ".join(runtime_warnings) if runtime_warnings else None
+    return candidate, applied_ok, warning_msg

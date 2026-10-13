@@ -1715,24 +1715,33 @@ class PlexScanner:
             data = response.json()
 
             item_id = data.get("ItemId") or data.get("item_id")
-            status = data.get("Status") or data.get("status", "")
-            if item_id or status.lower() in (
-                "created",
-                "existing",
-                "found",
-                "ok",
-                "success",
-            ):
+            status = str(data.get("Status") or data.get("status") or "").lower()
+
+            # Item is confirmed in library when ItemId is returned
+            if item_id:
+                self.history.clear_entry(path)
                 logger.info(
-                    f"🔎 Targeted plugin scan successful for: {BOLD}{path}{RESET}"
-                    + (f" (ItemId: {item_id})" if item_id else f" (Status: {status})")
+                    f"🔎 Targeted plugin scan successful for: {BOLD}{path}{RESET} (ItemId: {item_id})"
                 )
-                if item_id:
-                    # Kick off a metadata refresh immediately so artwork appears fast
+                if self.config.get("PLEX_REFRESH"):
+                    # Kick off metadata refresh when user setting is enabled
                     self.scan_monitor_executor.submit(
                         self.refresh_jellyfin_item, item_id
                     )
                 return True
+
+            # If plugin returned success without ItemId, scan was accepted on server
+            if status in ("created", "existing", "found", "ok", "success"):
+                logger.info(
+                    f"🔎 Targeted plugin scan accepted for: {BOLD}{path}{RESET} (Status: {status})"
+                )
+                # Enqueue verification so post-scan confirms the item ID and clears history only on confirmation
+                self.scan_monitor_executor.submit(
+                    self._post_scan_process_file_delayed, path, delay=5
+                )
+                return True
+
+            return False
         except Exception as e:
             logger.debug(f"Targeted plugin scan failed for {path}: {e}")
         return False
@@ -2027,30 +2036,111 @@ class PlexScanner:
                 )
 
     def get_jellyfin_item_id(self, file_path):
-        """Query Jellyfin/Emby API directly to get the item ID for a file path."""
+        """Query Jellyfin/Emby API directly to get the item ID for a file path.
+
+        Verifies that returned items actually correspond to the requested file
+        path (or containing movie container directory), detects ambiguities, and
+        avoids mistakenly matching library roots or generic folders.
+        """
         server_url = (self.config.get("SERVER_URL") or "").rstrip("/")
-        url = f"{server_url}/Items"
+        if not server_url or not file_path:
+            return None
+
         headers = self._get_jellyfin_headers()
-        params = {"Path": file_path, "Fields": "Path", **self._get_jellyfin_params()}
+        norm_file_path = os.path.normpath(file_path)
+        file_dir = os.path.normpath(os.path.dirname(file_path))
+        is_case_sensitive = os.name != "nt"
+
+        def _paths_equal(p1, p2):
+            if not p1 or not p2:
+                return False
+            norm1 = os.path.normpath(p1)
+            norm2 = os.path.normpath(p2)
+            if is_case_sensitive:
+                return norm1 == norm2
+            return norm1.lower() == norm2.lower()
+
+        def _resolve_best_match(items):
+            if not items:
+                return "NOT_FOUND", None
+            exact_file_matches = []
+            container_dir_matches = []
+
+            for item in items:
+                ipath = item.get("Path")
+                if not ipath:
+                    continue
+                itype = str(item.get("Type") or "").lower()
+
+                # Priority 1: Exact file path match
+                if _paths_equal(ipath, norm_file_path):
+                    exact_file_matches.append(item.get("Id"))
+
+                # Priority 2: Containing directory match (strictly Movie items only, never generic folders or roots)
+                elif _paths_equal(ipath, file_dir):
+                    if itype == "movie":
+                        container_dir_matches.append(item.get("Id"))
+
+            # Return unique exact file match
+            unique_exact = list(dict.fromkeys([i for i in exact_file_matches if i]))
+            if len(unique_exact) == 1:
+                return "MATCH", unique_exact[0]
+            elif len(unique_exact) > 1:
+                logger.warning(
+                    f"Ambiguous exact matches ({len(unique_exact)}) for path '{file_path}'; rejecting lookup."
+                )
+                return "AMBIGUOUS", None
+
+            # Fall back to containing movie folder match only if no file match exists
+            unique_container = list(dict.fromkeys([i for i in container_dir_matches if i]))
+            if len(unique_container) == 1:
+                return "MATCH", unique_container[0]
+            elif len(unique_container) > 1:
+                logger.warning(
+                    f"Ambiguous container matches ({len(unique_container)}) for path '{file_path}'; rejecting lookup."
+                )
+                return "AMBIGUOUS", None
+
+            return "NOT_FOUND", None
+
         try:
+            # 1. Direct path lookup
+            url = f"{server_url}/Items"
+            params = {"Path": file_path, "Fields": "Path,Type", **self._get_jellyfin_params()}
             res = self.http_session.get(url, headers=headers, params=params, timeout=10)
             res.raise_for_status()
             data = res.json()
             items = data.get("Items", [])
-            if items:
-                return items[0].get("Id")
+            status, match_id = _resolve_best_match(items)
+            if status == "MATCH":
+                return match_id
+            elif status == "AMBIGUOUS":
+                # Known ambiguous direct response; stop immediately to prevent picking a wrong candidate in fallback
+                return None
 
-            # Fallback to searching by filename if direct path lookup failed
-            filename = os.path.basename(file_path)
-            search_url = f"{server_url}/Items?Recursive=true&Fields=Path&searchTerm={quote(filename)}"
-            res = self.http_session.get(search_url, headers=headers, params=self._get_jellyfin_params(), timeout=10)
-            res.raise_for_status()
-            items = res.json().get("Items", [])
-            norm_file_path = os.path.normpath(file_path).lower()
-            for item in items:
-                item_path = item.get("Path")
-                if item_path and os.path.normpath(item_path).lower() == norm_file_path:
-                    return item.get("Id")
+            # 2. Search fallback: search by title stem (without extension) and folder name
+            terms = []
+            stem = os.path.splitext(os.path.basename(file_path))[0]
+            if stem:
+                terms.append(stem)
+            folder_name = os.path.basename(file_dir)
+            if folder_name and folder_name != stem:
+                terms.append(folder_name)
+
+            for term in terms:
+                search_url = f"{server_url}/Items?Recursive=true&Fields=Path,Type&searchTerm={quote(term)}"
+                res = self.http_session.get(
+                    search_url, headers=headers, params=self._get_jellyfin_params(), timeout=10
+                )
+                res.raise_for_status()
+                search_items = res.json().get("Items", [])
+                status, match_id = _resolve_best_match(search_items)
+                if status == "MATCH":
+                    return match_id
+                elif status == "AMBIGUOUS":
+                    # Ambiguous fallback matches; stop immediately
+                    return None
+
             return None
         except Exception as e:
             logger.error(f"Error getting Jellyfin/Emby item ID for {file_path}: {e}")
@@ -2083,15 +2173,21 @@ class PlexScanner:
                 f"Failed to trigger Jellyfin/Emby refresh for item ID {item_id}: {e}"
             )
 
-    def _post_scan_process_file(self, file_path):
-        """Perform post-scan actions (metadata refresh, analysis) for a scanned file."""
+    def _post_scan_process_file(self, file_path, max_attempts=3):
+        """Perform post-scan actions (metadata refresh, analysis) for a scanned file.
+
+        Uses bounded retries with backoff to tolerate delayed item indexing transactions.
+        """
         server_type = self.config.get("SERVER_TYPE", "plex")
 
-        # Wait a small moment to ensure Plex/Jellyfin database transactions have settled
-        time.sleep(2)
-
         if server_type == "plex":
-            rating_key = self.get_plex_rating_key(file_path)
+            rating_key = None
+            for attempt in range(max_attempts):
+                time.sleep(2 if attempt == 0 else 3)
+                rating_key = self.get_plex_rating_key(file_path)
+                if rating_key:
+                    break
+
             if rating_key:
                 # Clear stuck status immediately as it's now confirmed in the library!
                 self.history.clear_entry(file_path)
@@ -2103,7 +2199,13 @@ class PlexScanner:
                 )
 
         elif server_type in ["jellyfin", "emby"]:
-            item_id = self.get_jellyfin_item_id(file_path)
+            item_id = None
+            for attempt in range(max_attempts):
+                time.sleep(2 if attempt == 0 else 3)
+                item_id = self.get_jellyfin_item_id(file_path)
+                if item_id:
+                    break
+
             if item_id:
                 # Clear stuck status immediately as it's now confirmed in the library!
                 self.history.clear_entry(file_path)
@@ -2113,6 +2215,104 @@ class PlexScanner:
                 logger.debug(
                     f"Could not find Jellyfin/Emby item ID for newly scanned file: {file_path}"
                 )
+
+    def reschedule(self, interval=None, interval_unit=None, start_time=None):
+        """Safely updates scan schedule using a staging scheduler before touching active jobs."""
+        import schedule
+
+        if interval is None:
+            interval = self.config.get("RUN_INTERVAL", 24)
+        if interval_unit is None:
+            interval_unit = self.config.get("RUN_INTERVAL_UNIT", "hours")
+        if start_time is None:
+            start_time = self.config.get("START_TIME", "")
+
+        unit = str(interval_unit or "hours").lower()
+        if unit not in ("hours", "minutes"):
+            unit = "hours"
+
+        try:
+            interval_val = max(1, int(interval))
+        except (ValueError, TypeError):
+            interval_val = 24
+
+        parsed_time = None
+        if start_time and unit == "hours":
+            try:
+                parts = str(start_time).strip().split(":")
+                if len(parts) == 2:
+                    h, m = int(parts[0]), int(parts[1])
+                    if 0 <= h < 24 and 0 <= m < 60:
+                        parsed_time = (h, m)
+            except (ValueError, TypeError):
+                parsed_time = None
+
+        # 1. Stage and validate new job creation on an isolated Scheduler instance first.
+        # If anything throws here, active schedule.jobs remains 100% untouched!
+        test_scheduler = schedule.Scheduler()
+        try:
+            if parsed_time and unit == "hours":
+                start_hour, start_minute = parsed_time
+                for i in range(0, 24, interval_val):
+                    hour = (start_hour + i) % 24
+                    time_str = f"{hour:02d}:{start_minute:02d}"
+                    test_scheduler.every().day.at(time_str).do(self.run_scan).tag("scanner")
+            elif unit == "minutes":
+                test_scheduler.every(interval_val).minutes.do(self.run_scan).tag("scanner")
+            else:
+                test_scheduler.every(interval_val).hours.do(self.run_scan).tag("scanner")
+        except Exception as stage_err:
+            logger.error(f"Failed to prepare replacement schedule jobs: {stage_err}")
+            return False, str(stage_err)
+
+        # 2. Single-pass identification of jobs owned by this scanner instance (tagged 'scanner' or bound to self.run_scan)
+        def _is_owned_scanner_job(job):
+            if "scanner" in getattr(job, "tags", set()):
+                return True
+            fn = getattr(job, "job_func", None)
+            actual_fn = getattr(fn, "func", fn)
+            return actual_fn == self.run_scan
+
+        old_scanner_jobs = [j for j in list(schedule.jobs) if _is_owned_scanner_job(j)]
+
+        # 3. Create the new jobs in global schedule and retain references for rollback
+        new_jobs = []
+        try:
+            if parsed_time and unit == "hours":
+                start_hour, start_minute = parsed_time
+                for i in range(0, 24, interval_val):
+                    hour = (start_hour + i) % 24
+                    time_str = f"{hour:02d}:{start_minute:02d}"
+                    new_jobs.append(schedule.every().day.at(time_str).do(self.run_scan).tag("scanner"))
+            elif unit == "minutes":
+                new_jobs.append(schedule.every(interval_val).minutes.do(self.run_scan).tag("scanner"))
+            else:
+                new_jobs.append(schedule.every(interval_val).hours.do(self.run_scan).tag("scanner"))
+
+            # Cancel old scanner jobs now that new jobs are successfully created
+            for j in old_scanner_jobs:
+                schedule.cancel_job(j)
+
+            logger.info(
+                f"Rescheduled runs: every {interval_val} {unit}"
+                + (f" (start {start_time})" if parsed_time else "")
+            )
+            return True, None
+        except Exception as reg_err:
+            logger.error(f"Error publishing schedule jobs: {reg_err}. Rolling back.")
+            for j in new_jobs:
+                schedule.cancel_job(j)
+            # If no scanner jobs remain, restore safe fallback matching requested unit
+            current_scanner_jobs = [j for j in schedule.jobs if "scanner" in getattr(j, "tags", set())]
+            if not current_scanner_jobs and not old_scanner_jobs:
+                try:
+                    if unit == "minutes":
+                        schedule.every(interval_val).minutes.do(self.run_scan).tag("scanner")
+                    else:
+                        schedule.every(interval_val).hours.do(self.run_scan).tag("scanner")
+                except Exception:
+                    pass
+            return False, str(reg_err)
 
     def shutdown(self, timeout=10):
         self.stop_event.set()
