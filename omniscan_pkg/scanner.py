@@ -24,6 +24,10 @@ from .metrics import (
 from .models import StuckFileTracker
 from .config import get_jellyfin_headers, get_jellyfin_params
 
+# Cap on tracked abandoned ProviderIds lookups (visibility only; daemon
+# threads themselves die with the process and need no reclamation).
+_MAX_ORPHANED_IO_THREADS = 50
+
 try:
     import websocket
 
@@ -134,6 +138,12 @@ class PlexScanner:
         self._io_helper_executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="omniscan-io"
         )
+
+        # Bounded visibility into abandoned ProviderIds lookups: entries are
+        # (item_id, monotonic timestamp); capped so stuck lookups cannot grow
+        # memory. Daemon threads need no join — they die with the process.
+        self._orphaned_io_threads: list = []
+        self._orphaned_io_lock = threading.Lock()
 
         # Start the background worker for debounced scans
         self.worker_thread = threading.Thread(
@@ -2165,50 +2175,98 @@ class PlexScanner:
         re-persists filename-derived values. timeout caps the single HTTP
         operation; callers pass the remaining deadline budget.
 
-        Runs the blocking Requests call in a dedicated single-thread helper
-        executor and waits at most `timeout` for the future: Requests'
-        scalar timeout only bounds connect/read inactivity, so a trickling
-        server could otherwise hold a shared scan_monitor worker past the
-        deadline. (The orphaned socket/connection is reclaimed by the pool
-        on completion; pool_maxsize=100 keeps this bounded.)
+        Runs the blocking urllib3 call on a short-lived daemon thread and
+        joins it for at most `timeout`: unlike Requests' scalar timeout
+        (connect/read inactivity only), the join is a true total-elapsed
+        cap, so a trickling server cannot hold a shared scan_monitor worker
+        past the deadline. The orphaned thread is a daemon — it never blocks
+        interpreter exit — and is tracked in `_orphaned_io_threads` with a
+        bounded size so stuck lookups are visible in logs instead of
+        silently accumulating. Each lookup uses a fresh one-shot
+        urllib3 PoolManager (no shared pool), so a stuck socket can never
+        wedge subsequent lookups; the OS reclaims it on close/timeout.
         """
+        import urllib3
+
         server_url = (self.config.get("SERVER_URL") or "").rstrip("/")
         if not server_url or not item_id:
             return {}
+        try:
+            timeout = float(timeout)
+        except (TypeError, ValueError):
+            timeout = 10.0
+        if timeout <= 0:
+            return {}
         headers = self._get_jellyfin_headers()
         params = {"Fields": "ProviderIds", **self._get_jellyfin_params()}
-        future = self._io_helper_executor.submit(
-            self._fetch_provider_ids_blocking,
-            server_url,
-            item_id,
-            headers,
-            params,
-            timeout,
+        box: dict = {}
+        worker = threading.Thread(
+            target=self._fetch_provider_ids_thread,
+            args=(server_url, item_id, headers, params, timeout, box),
+            daemon=True,
+            name=f"omniscan-providerids-{item_id[:8]}",
+        )
+        worker.start()
+        worker.join(timeout=timeout)
+        if worker.is_alive():
+            # Still trickling past the total deadline: abandon it. Daemon
+            # thread cannot block shutdown; bounded tracking for visibility.
+            with self._orphaned_io_lock:
+                self._orphaned_io_threads.append((item_id, time.time()))
+                del self._orphaned_io_threads[: -_MAX_ORPHANED_IO_THREADS :]
+            logger.debug(
+                f"ProviderIds lookup exceeded {timeout:.1f}s total for item "
+                f"{item_id}; skipping (orphaned daemon will die with process)."
+            )
+            return {}
+        result = box.get("result")
+        return result if isinstance(result, dict) else {}
+
+    def _fetch_provider_ids_thread(
+        self, server_url, item_id, headers, params, timeout, box
+    ):
+        """Blocking ProviderIds GET on a disposable daemon thread.
+
+        Uses a fresh one-shot urllib3 PoolManager (never the shared
+        requests session) so a stuck socket cannot wedge the pool or later
+        lookups. Result (dict) is stored in `box["result"]`.
+        """
+        import urllib3
+        from urllib.parse import urlencode
+
+        url = f"{server_url}/Items/{item_id}?{urlencode(params)}"
+        http = urllib3.PoolManager(
+            num_pools=1,
+            maxsize=1,
+            timeout=urllib3.Timeout(connect=min(timeout, 5.0), read=timeout),
+            retries=False,
         )
         try:
-            result = future.result(timeout=timeout)
-            return result if isinstance(result, dict) else {}
-        except Exception as e:
-            logger.debug(f"ProviderIds lookup timed out/failed for item {item_id}: {e}")
-            future.cancel()
-            return {}
+            resp = http.request("GET", url, headers=dict(headers or {}))
+            try:
+                if resp.status != 200:
+                    return
+                import json
 
-    def _fetch_provider_ids_blocking(self, server_url, item_id, headers, params, timeout):
-        """Synchronous ProviderIds GET; runs on the I/O helper executor."""
-        try:
-            res = self.http_session.get(
-                f"{server_url}/Items/{item_id}",
-                headers=headers,
-                params=params,
-                timeout=timeout,
-            )
-            res.raise_for_status()
-            data = res.json()
-            provider_ids = data.get("ProviderIds") or {}
-            return provider_ids if isinstance(provider_ids, dict) else {}
+                try:
+                    data = json.loads(resp.data.decode("utf-8") or "{}")
+                except Exception:
+                    return
+                provider_ids = (data or {}).get("ProviderIds") or {}
+                if isinstance(provider_ids, dict):
+                    box["result"] = provider_ids
+            finally:
+                try:
+                    resp.release_conn()
+                except Exception:
+                    pass
         except Exception as e:
             logger.debug(f"Could not fetch ProviderIds for item {item_id}: {e}")
-            return {}
+        finally:
+            try:
+                http.clear()
+            except Exception:
+                pass
 
     def wait_for_jellyfin_identification(self, item_id, max_attempts=5, max_wait_seconds=15):
         """Poll until Jellyfin has provider IDs for the item.

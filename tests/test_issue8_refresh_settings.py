@@ -372,30 +372,85 @@ class TestIssue8Regression(unittest.TestCase):
 
     def test_get_provider_ids_returns_empty_when_helper_exceeds_timeout(self):
         """A trickling server must not hold the caller past the budget."""
-        import concurrent.futures
+        import threading
 
-        real_submit = self.scanner._io_helper_executor.submit
+        real_thread = threading.Thread
 
-        def slow_submit(fn, *args, **kwargs):
-            fut = concurrent.futures.Future()
+        class HangingThread:
+            def __init__(self, *args, **kwargs):
+                self._kwargs = kwargs
 
-            def _never_finish():
-                import time as _time
+            def start(self):
+                pass
 
-                _time.sleep(30)
+            def join(self, timeout=None):
+                pass
 
-            import threading
+            def is_alive(self):
+                return True
 
-            threading.Thread(target=_never_finish, daemon=True).start()
-            return fut
-
-        with patch.object(
-            self.scanner, "_io_helper_executor"
-        ) as mock_exec:
-            mock_exec.submit.side_effect = slow_submit
+        with patch("omniscan_pkg.scanner.threading.Thread", HangingThread):
+            start = __import__("time").monotonic()
             self.assertEqual(
-                self.scanner.get_jellyfin_item_provider_ids("item-abc", timeout=0.05),
+                self.scanner.get_jellyfin_item_provider_ids("item-abc", timeout=0.2),
                 {},
+            )
+            elapsed = __import__("time").monotonic() - start
+            # Caller returns within budget despite the hung I/O thread…
+            self.assertLess(elapsed, 5)
+            # …and the hang is tracked (bounded) for visibility.
+            self.assertEqual(len(self.scanner._orphaned_io_threads), 1)
+
+    def test_get_provider_ids_recovers_after_trickle(self):
+        """A stuck lookup must not wedge subsequent lookups."""
+        import threading
+
+        calls = {"n": 0}
+        real_thread_cls = threading.Thread
+
+        class OneHungThenReal:
+            def __init__(self, *args, **kwargs):
+                self._target = kwargs.get("target")
+                self._args = kwargs.get("args", ())
+                self._alive = True
+                self._t = None
+
+            def start(self):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    return  # first lookup hangs forever
+                self._t = real_thread_cls(
+                    target=self._target, args=self._args, daemon=True
+                )
+                self._t.start()
+
+            def join(self, timeout=None):
+                if self._t is not None:
+                    self._t.join(timeout=timeout)
+
+            def is_alive(self):
+                if self._t is not None:
+                    return self._t.is_alive()
+                return True
+
+        with patch(
+            "omniscan_pkg.scanner.threading.Thread", OneHungThenReal
+        ), patch.object(
+            self.scanner,
+            "_fetch_provider_ids_thread",
+            side_effect=lambda *a: a[-1].update(
+                {"result": {"Tmdb": "1302904"}}
+            ),
+        ):
+            # First lookup hangs -> {} …
+            self.assertEqual(
+                self.scanner.get_jellyfin_item_provider_ids("item-abc", timeout=0.2),
+                {},
+            )
+            # …second lookup succeeds: no shared worker was wedged.
+            self.assertEqual(
+                self.scanner.get_jellyfin_item_provider_ids("item-abc", timeout=5),
+                {"Tmdb": "1302904"},
             )
 
     def test_try_plugin_scan_item_id_submits_no_python_refresh(self):
