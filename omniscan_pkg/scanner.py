@@ -28,6 +28,14 @@ from .config import get_jellyfin_headers, get_jellyfin_params
 # threads themselves die with the process and need no reclamation).
 _MAX_ORPHANED_IO_THREADS = 50
 
+# Cap on live concurrent ProviderIds I/O workers (threads + sockets +
+# response buffers). Slots are held until the worker truly exits, so this
+# bounds outstanding resources; saturated lookups return {} immediately.
+_MAX_PROVIDER_IDS_INFLIGHT = 4
+
+# Hard cap on ProviderIds response body bytes (streamed, never preloaded).
+_MAX_PROVIDER_IDS_BODY_BYTES = 256 * 1024
+
 try:
     import websocket
 
@@ -144,6 +152,12 @@ class PlexScanner:
         # memory. Daemon threads need no join — they die with the process.
         self._orphaned_io_threads: list = []
         self._orphaned_io_lock = threading.Lock()
+
+        # Admission control for live ProviderIds I/O: slots held until the
+        # worker truly exits, bounding outstanding threads/sockets/buffers.
+        self._provider_ids_inflight = threading.Semaphore(
+            _MAX_PROVIDER_IDS_INFLIGHT
+        )
 
         # Start the background worker for debounced scans
         self.worker_thread = threading.Thread(
@@ -2179,12 +2193,15 @@ class PlexScanner:
         joins it for at most `timeout`: unlike Requests' scalar timeout
         (connect/read inactivity only), the join is a true total-elapsed
         cap, so a trickling server cannot hold a shared scan_monitor worker
-        past the deadline. The orphaned thread is a daemon — it never blocks
-        interpreter exit — and is tracked in `_orphaned_io_threads` with a
-        bounded size so stuck lookups are visible in logs instead of
-        silently accumulating. Each lookup uses a fresh one-shot
-        urllib3 PoolManager (no shared pool), so a stuck socket can never
-        wedge subsequent lookups; the OS reclaims it on close/timeout.
+        past the deadline. Live I/O threads are admission-controlled by
+        `_provider_ids_inflight` (max `_MAX_PROVIDER_IDS_INFLIGHT`): when
+        saturated, new lookups return {} immediately instead of spawning
+        unbounded threads/sockets. Slots are held until the worker truly
+        exits, so outstanding trickling I/O is bounded, not just the
+        timestamp list. Each lookup uses a fresh one-shot urllib3
+        PoolManager with `preload_content=False` and a bounded body cap, so
+        a stuck socket cannot wedge later lookups and response buffers
+        cannot grow without limit. Daemon threads never block shutdown.
         """
         import urllib3
 
@@ -2196,6 +2213,16 @@ class PlexScanner:
         except (TypeError, ValueError):
             timeout = 10.0
         if timeout <= 0:
+            return {}
+        # Admission control: bound outstanding live I/O. The slot is held
+        # until the worker truly exits (released in the worker's finally),
+        # so this caps threads + sockets + buffers, not just bookkeeping.
+        acquired = self._provider_ids_inflight.acquire(blocking=False)
+        if not acquired:
+            logger.debug(
+                f"ProviderIds lookup saturated ({_MAX_PROVIDER_IDS_INFLIGHT} "
+                f"inflight); skipping for item {item_id}."
+            )
             return {}
         headers = self._get_jellyfin_headers()
         params = {"Fields": "ProviderIds", **self._get_jellyfin_params()}
@@ -2209,14 +2236,16 @@ class PlexScanner:
         worker.start()
         worker.join(timeout=timeout)
         if worker.is_alive():
-            # Still trickling past the total deadline: abandon it. Daemon
-            # thread cannot block shutdown; bounded tracking for visibility.
+            # Still trickling past the total deadline: abandon it. The slot
+            # stays held until the worker actually exits (released in its
+            # finally), so repeated timeouts saturate at the cap instead of
+            # spawning unbounded threads. Bounded tracking for visibility.
             with self._orphaned_io_lock:
                 self._orphaned_io_threads.append((item_id, time.time()))
                 del self._orphaned_io_threads[: -_MAX_ORPHANED_IO_THREADS :]
             logger.debug(
                 f"ProviderIds lookup exceeded {timeout:.1f}s total for item "
-                f"{item_id}; skipping (orphaned daemon will die with process)."
+                f"{item_id}; skipping (slot held until worker exits)."
             )
             return {}
         result = box.get("result")
@@ -2229,7 +2258,10 @@ class PlexScanner:
 
         Uses a fresh one-shot urllib3 PoolManager (never the shared
         requests session) so a stuck socket cannot wedge the pool or later
-        lookups. Result (dict) is stored in `box["result"]`.
+        lookups. Body is streamed with a hard byte cap so a trickling
+        response cannot accumulate unbounded buffers. The inflight slot is
+        released only when this worker truly exits. Result (dict) is stored
+        in `box["result"]`.
         """
         import urllib3
         from urllib.parse import urlencode
@@ -2242,14 +2274,36 @@ class PlexScanner:
             retries=False,
         )
         try:
-            resp = http.request("GET", url, headers=dict(headers or {}))
+            resp = http.request(
+                "GET", url, headers=dict(headers or {}), preload_content=False
+            )
             try:
                 if resp.status != 200:
                     return
                 import json
 
+                chunks = []
+                received = 0
                 try:
-                    data = json.loads(resp.data.decode("utf-8") or "{}")
+                    for chunk in resp.stream(_MAX_PROVIDER_IDS_BODY_BYTES // 8 or 4096):
+                        if not chunk:
+                            break
+                        received += len(chunk)
+                        if received > _MAX_PROVIDER_IDS_BODY_BYTES:
+                            logger.debug(
+                                f"ProviderIds response exceeded "
+                                f"{_MAX_PROVIDER_IDS_BODY_BYTES} bytes for item "
+                                f"{item_id}; discarding."
+                            )
+                            return
+                        chunks.append(chunk)
+                finally:
+                    try:
+                        resp.release_conn()
+                    except Exception:
+                        pass
+                try:
+                    data = json.loads(b"".join(chunks).decode("utf-8") or "{}")
                 except Exception:
                     return
                 provider_ids = (data or {}).get("ProviderIds") or {}
@@ -2267,6 +2321,7 @@ class PlexScanner:
                 http.clear()
             except Exception:
                 pass
+            self._provider_ids_inflight.release()
 
     def wait_for_jellyfin_identification(self, item_id, max_attempts=5, max_wait_seconds=15):
         """Poll until Jellyfin has provider IDs for the item.
